@@ -374,3 +374,27 @@
 
 ### Confidence
 - Overall: [HIGH]
+
+---
+## [2026-04-06 21:00] Phase P5.3: B7 ToCa Token Caching
+
+### Changes made
+- `tokens/toca.py` — ToCaConfig, ToCaState, TokenCacheManager with identify_stable_tokens (cosine sim + attention priority + cache_ratio cap), apply_cache (mx.where), get_dynamic_indices, reset. Fully vectorized. [HIGH]
+- `orchestrator.py` — Added toca config + TokenCacheManager lifecycle + property + reset [HIGH]
+- `tests/test_toca.py` — 9 tests [HIGH]
+
+### Confidence
+- Overall: [HIGH]
+
+---
+## [2026-04-06 21:30] Phase P5.4: B12 DiTFastAttn + residual
+
+### Changes made
+- `attention/ditfastattn.py` — HeadStrategy enum, DiTFastAttnConfig/State, DiTFastAttnManager with auto-profiling (variance-based sensitivity), per-head strategy assignment (FULL/WINDOW/CACHED), window mask generation, cache/get roundtrip [HIGH]
+- `attention/residual.py` — scaled_residual_add (with optional gate), compute_residual_scale (inverse_sqrt/linear/constant), residual_gate_from_sensitivity [HIGH]
+- `orchestrator.py` — Added ditfastattn config + DiTFastAttnManager lifecycle + property + reset [HIGH]
+- `tests/test_ditfastattn.py` — 8 tests: pre-profile all FULL, profiling assigns strategies, high/low variance, cache_start_step, window mask, cache roundtrip, reset, disabled [HIGH]
+- `tests/test_residual.py` — 8 tests: add without gate, with scale, with gate, inverse_sqrt/linear/constant scale, sensitivity gate, default, clamping [HIGH]
+
+### Confidence
+- Overall: [HIGH]
