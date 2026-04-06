@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.npz
+debug/latents/
+debug/frames/
+debug/logs/
+outputs/
+.DS_Store

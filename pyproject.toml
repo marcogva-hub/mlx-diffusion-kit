@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlx-diffusion-kit"
+version = "0.1.0"
+description = "Inference optimizations for diffusion and video super-resolution models on MLX / Apple Silicon"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Marco Marcelino"}]
+requires-python = ">=3.10"
+dependencies = ["mlx>=0.25.0"]
+
+[project.optional-dependencies]
+mfa = ["mlx-flashattention-steel>=2.26.0"]
+dev = ["pytest", "numpy"]
+
+[tool.setuptools.packages.find]
+include = ["mlx_diffusion_kit*"]
