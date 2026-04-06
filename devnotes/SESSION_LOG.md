@@ -298,3 +298,28 @@
 ### Confidence
 - Overall: [HIGH]
 - Note: int4 uses int8 dtype with reduced range (clamp to [-7,7]). True 4-bit packing would halve memory further but requires bitwise ops.
+
+---
+## [2026-04-06 18:00] Phase P6.1: ToPi + ToMe video scoring + attn_bias
+
+### Plan
+- **Objective:** Complete B8 token optimization module with pruning, video-aware similarity, and mlx-mfa bridge
+- **Files to modify:** tokens/pruning.py (new), tokens/tome.py (add functions + modify signature), tokens/__init__.py, __init__.py
+
+### Changes made
+- `tokens/pruning.py` — ToPiConfig, PruneInfo, compute_token_importance (attention/norm/random), topi_prune, topi_restore (copy/zero/lerp). Fully vectorized, no .item() calls. [HIGH]
+- `tokens/tome.py` — Added compute_spatiotemporal_similarity (cosine + spatial + temporal proximity), compute_attn_bias_for_mfa (log-count in [1,1,1,N_merged] shape), tome_merge now accepts spatial_dims parameter [HIGH]
+- `tests/test_pruning.py` — 10 tests: shape restore, passthrough, norm importance, random count, attention importance, copy/zero restore, disabled, finite [HIGH]
+- `tests/test_tome.py` — 5 new tests: spatiotemporal nearby higher, shape, merge with spatial_dims, attn_bias shape/values, integration [HIGH]
+
+### Dependency & regression check
+- tome_merge signature extended with optional spatial_dims/weights — backward compatible (defaults to None)
+- All 150 existing tests pass without modification
+
+### Tech cost assessment
+- ToPi prune: O(N log N) argsort + O(N_pruned × N_kept) nearest neighbor. No .item() calls.
+- Spatiotemporal similarity: O(N²) pairwise distance matrices. Same as cosine_similarity.
+- attn_bias: O(N_src) one-liner wrapping compute_proportional_bias.
+
+### Confidence
+- Overall: [HIGH]
