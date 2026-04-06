@@ -13,6 +13,13 @@ from typing import Optional
 
 import mlx.core as mx
 
+from mlx_diffusion_kit.cache.fbcache import (
+    FBCacheConfig,
+    FBCacheState,
+    create_fbcache_state,
+    fbcache_should_compute,
+    fbcache_update,
+)
 from mlx_diffusion_kit.cache.multigranular import MultiGranularCache, MultiGranularConfig
 from mlx_diffusion_kit.cache.encoder_sharing import (
     EncoderSharingConfig,
@@ -21,6 +28,13 @@ from mlx_diffusion_kit.cache.encoder_sharing import (
     encoder_sharing_get_cached,
     encoder_sharing_should_recompute,
     encoder_sharing_update,
+)
+from mlx_diffusion_kit.cache.spectral_cache import (
+    SpectralCacheConfig,
+    SpectralCacheState,
+    create_spectral_cache_state,
+    spectral_cache_should_compute,
+    spectral_cache_update,
 )
 from mlx_diffusion_kit.cache.smooth_cache import (
     SmoothCacheConfig,
@@ -73,6 +87,8 @@ class PISAConfig:
 @dataclass
 class OrchestratorConfig:
     teacache: Optional[TeaCacheConfig] = None
+    fbcache: Optional[FBCacheConfig] = None
+    spectral_cache: Optional[SpectralCacheConfig] = None
     smooth_cache: Optional[SmoothCacheConfig] = None
     tome: Optional[ToMeConfig] = None
     tgate: Optional[TGateConfig] = None
@@ -105,6 +121,14 @@ class DiffusionOptimizer:
         self._teacache_state: Optional[TeaCacheState] = None
         if self.config.teacache and not self.config.is_single_step:
             self._teacache_state = create_teacache_state()
+
+        self._fbcache_state: Optional[FBCacheState] = None
+        if self.config.fbcache and not self.config.is_single_step:
+            self._fbcache_state = create_fbcache_state()
+
+        self._spectral_cache_state: Optional[SpectralCacheState] = None
+        if self.config.spectral_cache and not self.config.is_single_step:
+            self._spectral_cache_state = create_spectral_cache_state()
 
         self._tgate_state: Optional[TGateState] = None
         if self.config.tgate and not self.config.is_single_step:
@@ -186,14 +210,27 @@ class DiffusionOptimizer:
 
         return BlockStrategy.COMPUTE
 
-    def should_compute_step(self, step_idx: int, modulated_input: mx.array) -> bool:
+    def should_compute_step(
+        self,
+        step_idx: int,
+        modulated_input: mx.array,
+        first_block_output: Optional[mx.array] = None,
+        sigma_t: float = 0.5,
+    ) -> bool:
         """Check if the full model forward should run for this step.
 
-        Uses TeaCache for multi-step models. Single-step always returns True.
+        Cascade priority (first configured wins):
+          1. TeaCache — best quality, requires calibrated coefficients
+          2. SpectralCache — frequency-domain detection, requires sigma_t
+          3. FBCache — zero-calibration fallback, requires first_block_output
+
+        Single-step models always return True.
 
         Args:
             step_idx: Current diffusion step.
             modulated_input: Timestep-modulated input tensor.
+            first_block_output: Output of first transformer block (for FBCache).
+            sigma_t: Current noise level 0→1 (for SpectralCache).
 
         Returns:
             True if the step should be computed, False to reuse cache.
@@ -201,25 +238,48 @@ class DiffusionOptimizer:
         if self.config.is_single_step:
             return True
 
-        if self._teacache_state is None or self.config.teacache is None:
-            return True
+        # Priority 1: TeaCache
+        if self._teacache_state is not None and self.config.teacache is not None:
+            return teacache_should_compute(
+                modulated_input, step_idx, self.config.teacache, self._teacache_state
+            )
 
-        return teacache_should_compute(
-            modulated_input, step_idx, self.config.teacache, self._teacache_state
-        )
+        # Priority 2: SpectralCache
+        if self._spectral_cache_state is not None and self.config.spectral_cache is not None:
+            return spectral_cache_should_compute(
+                modulated_input, sigma_t, self.config.spectral_cache, self._spectral_cache_state
+            )
+
+        # Priority 3: FBCache
+        if self._fbcache_state is not None and self.config.fbcache is not None:
+            if first_block_output is not None:
+                return fbcache_should_compute(
+                    first_block_output, self.config.fbcache, self._fbcache_state
+                )
+
+        return True
 
     def update_step_cache(
-        self, modulated_input: mx.array, output: mx.array, step_idx: int = 0
+        self,
+        modulated_input: mx.array,
+        output: mx.array,
+        step_idx: int = 0,
+        first_block_output: Optional[mx.array] = None,
     ) -> None:
-        """Update TeaCache and SmoothCache state after a computed step.
+        """Update all step-level caches after a computed step.
 
         Args:
             modulated_input: The input that was computed.
             output: The model's output.
             step_idx: Current step index (used by SmoothCache for interpolation).
+            first_block_output: First block output (for FBCache update).
         """
         if self._teacache_state is not None:
             teacache_update(modulated_input, output, self._teacache_state)
+        if self._fbcache_state is not None and first_block_output is not None:
+            fbcache_update(first_block_output, output, self._fbcache_state)
+        if self._spectral_cache_state is not None:
+            spectral_cache_update(modulated_input, output, self._spectral_cache_state)
         if self._smooth_cache_state is not None:
             smooth_cache_record(step_idx, output, self._smooth_cache_state)
 
@@ -242,6 +302,10 @@ class DiffusionOptimizer:
             )
         if self._teacache_state is not None:
             return self._teacache_state.cached_residual
+        if self._spectral_cache_state is not None:
+            return self._spectral_cache_state.cached_output
+        if self._fbcache_state is not None:
+            return self._fbcache_state.cached_full_output
         return None
 
     def merge_tokens(self, tokens: mx.array) -> mx.array:
@@ -365,10 +429,22 @@ class DiffusionOptimizer:
             return 1
         return self._ddit_scheduler.get_patch_stride(step_idx)
 
+    @property
+    def fbcache_state(self) -> Optional[FBCacheState]:
+        return self._fbcache_state
+
+    @property
+    def spectral_cache_state(self) -> Optional[SpectralCacheState]:
+        return self._spectral_cache_state
+
     def reset(self) -> None:
         """Reset all internal state for a new inference run."""
         if self._teacache_state is not None:
             self._teacache_state = create_teacache_state()
+        if self._fbcache_state is not None:
+            self._fbcache_state = create_fbcache_state()
+        if self._spectral_cache_state is not None:
+            self._spectral_cache_state = create_spectral_cache_state()
         if self._tgate_state is not None:
             self._tgate_state = create_tgate_state()
         if self._smooth_cache_state is not None:

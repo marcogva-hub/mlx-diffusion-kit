@@ -1,5 +1,12 @@
 """Step-level caching optimizations (B1-B6, B22)."""
 
+from mlx_diffusion_kit.cache.fbcache import (
+    FBCacheConfig,
+    FBCacheState,
+    create_fbcache_state,
+    fbcache_should_compute,
+    fbcache_update,
+)
 from mlx_diffusion_kit.cache.multigranular import (
     BWCacheConfig,
     BWCacheAllocator,
@@ -19,6 +26,13 @@ from mlx_diffusion_kit.cache.encoder_sharing import (
     encoder_sharing_should_recompute,
     encoder_sharing_update,
 )
+from mlx_diffusion_kit.cache.spectral_cache import (
+    SpectralCacheConfig,
+    SpectralCacheState,
+    create_spectral_cache_state,
+    spectral_cache_should_compute,
+    spectral_cache_update,
+)
 from mlx_diffusion_kit.cache.smooth_cache import (
     InterpolationMode,
     SmoothCacheConfig,
@@ -37,6 +51,18 @@ from mlx_diffusion_kit.cache.teacache import (
 )
 
 __all__ = [
+    # B2 FBCache
+    "FBCacheConfig",
+    "FBCacheState",
+    "create_fbcache_state",
+    "fbcache_should_compute",
+    "fbcache_update",
+    # B3 SpectralCache
+    "SpectralCacheConfig",
+    "SpectralCacheState",
+    "create_spectral_cache_state",
+    "spectral_cache_should_compute",
+    "spectral_cache_update",
     # B1 TeaCache
     "TeaCacheConfig",
     "TeaCacheState",
