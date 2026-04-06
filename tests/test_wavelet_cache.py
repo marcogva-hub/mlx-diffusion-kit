@@ -108,3 +108,67 @@ def test_chunked_decode_single_chunk():
     chunks = [mx.ones((1, 4, 8, 8))]
     result = chunked_decode_with_cache(mock_decode, chunks, cache)
     assert result.shape == (1, 4, 1, 8, 8)
+
+
+# --- Streaming / Buffer tests ---
+
+def test_output_buffer_mode():
+    """Buffer mode should produce identical result to concat mode."""
+    from mlx_diffusion_kit.vae.wavelet_cache import estimate_output_shape, preallocate_output_buffer
+
+    cache1 = WaveletVAECache()
+    cache2 = WaveletVAECache()
+
+    def mock_decode(chunk, c):
+        decoded = mx.expand_dims(chunk, axis=2)  # [B,C,1,H,W]
+        return decoded, {}
+
+    # 3 chunks: [1, 4, 8, 8] → decoded [1, 4, 1, 8, 8] each
+    chunks = [mx.ones((1, 4, 8, 8)) * (i + 1) for i in range(3)]
+
+    # Concat mode
+    result_concat = chunked_decode_with_cache(mock_decode, chunks, cache1)
+
+    # Buffer mode — need 5D chunks for estimate_output_shape
+    chunks_5d = [mx.ones((1, 4, 1, 8, 8)) * (i + 1) for i in range(3)]
+    shape = estimate_output_shape(chunks_5d)
+    buf = preallocate_output_buffer(shape)
+    result_buffer = chunked_decode_with_cache(mock_decode, chunks, cache2, output_buffer=buf)
+
+    assert result_buffer.shape == result_concat.shape
+    assert mx.allclose(result_buffer, result_concat)
+
+
+def test_callback_mode():
+    """Callback should be called once per chunk."""
+    cache = WaveletVAECache()
+    callback_log = []
+
+    def mock_decode(chunk, c):
+        return mx.expand_dims(chunk, axis=2), {}
+
+    def my_callback(idx, decoded):
+        callback_log.append((idx, decoded.shape))
+
+    chunks = [mx.ones((1, 4, 8, 8)) for _ in range(4)]
+    result = chunked_decode_with_cache(mock_decode, chunks, cache, callback=my_callback)
+
+    assert len(callback_log) == 4
+    assert callback_log[0][0] == 0
+    assert callback_log[3][0] == 3
+
+
+def test_estimate_output_shape():
+    from mlx_diffusion_kit.vae.wavelet_cache import estimate_output_shape
+
+    chunks = [mx.zeros((2, 3, 4, 16, 16)) for _ in range(3)]
+    shape = estimate_output_shape(chunks, spatial_upsample=2, temporal_upsample=1)
+    assert shape == (2, 3, 12, 32, 32)  # T=4*3=12, H=16*2=32, W=16*2=32
+
+
+def test_estimate_output_shape_temporal_upsample():
+    from mlx_diffusion_kit.vae.wavelet_cache import estimate_output_shape
+
+    chunks = [mx.zeros((1, 4, 2, 8, 8)) for _ in range(2)]
+    shape = estimate_output_shape(chunks, temporal_upsample=3)
+    assert shape == (1, 4, 12, 8, 8)  # T=2*2*3=12
