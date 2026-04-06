@@ -58,6 +58,7 @@ from mlx_diffusion_kit.gating.tgate import (
 )
 from mlx_diffusion_kit.quality.freeu import FreeUConfig
 from mlx_diffusion_kit.tokens.ddit_scheduling import DDiTScheduleConfig, DDiTScheduler
+from mlx_diffusion_kit.tokens.toca import ToCaConfig, TokenCacheManager
 from mlx_diffusion_kit.tokens.tome import (
     MergeInfo,
     ToMeConfig,
@@ -95,6 +96,7 @@ class OrchestratorConfig:
     tgate: Optional[TGateConfig] = None
     freeu: Optional[FreeUConfig] = None
     pisa: Optional[PISAConfig] = None
+    toca: Optional[ToCaConfig] = None
     deep_cache: Optional[DeepCacheConfig] = None
     multigranular: Optional[MultiGranularConfig] = None
     ddit_schedule: Optional[DDiTScheduleConfig] = None
@@ -149,6 +151,10 @@ class DiffusionOptimizer:
             self._ddit_scheduler = DDiTScheduler(
                 self.config.total_steps, self.config.ddit_schedule
             )
+
+        self._toca: Optional[TokenCacheManager] = None
+        if self.config.toca and not self.config.is_single_step:
+            self._toca = TokenCacheManager(self.config.toca)
 
         self._deep_cache: Optional[DeepCacheManager] = None
         if self.config.deep_cache and not self.config.is_single_step:
@@ -438,6 +444,10 @@ class DiffusionOptimizer:
         return self._ddit_scheduler.get_patch_stride(step_idx)
 
     @property
+    def toca_manager(self) -> Optional[TokenCacheManager]:
+        return self._toca
+
+    @property
     def deep_cache_manager(self) -> Optional[DeepCacheManager]:
         return self._deep_cache
 
@@ -483,6 +493,8 @@ class DiffusionOptimizer:
             self._smooth_cache_state = create_smooth_cache_state()
         if self._encoder_sharing_state is not None:
             self._encoder_sharing_state = create_encoder_sharing_state()
+        if self._toca is not None:
+            self._toca.reset()
         if self._deep_cache is not None:
             self._deep_cache.reset()
         if self._multigranular is not None:
