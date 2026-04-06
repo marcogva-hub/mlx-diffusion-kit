@@ -1,6 +1,12 @@
 """mlx-diffusion-kit: Inference optimizations for diffusion models on MLX."""
 
 from mlx_diffusion_kit.__version__ import __version__
+from mlx_diffusion_kit.cache.smooth_cache import (
+    InterpolationMode,
+    SmoothCacheConfig,
+    smooth_cache_interpolate,
+    smooth_cache_record,
+)
 from mlx_diffusion_kit.cache.teacache import (
     TeaCacheConfig,
     teacache_should_compute,
@@ -18,6 +24,11 @@ __all__ = [
     "__version__",
     # B1 TeaCache
     "TeaCacheConfig",
+    # B4 SmoothCache
+    "InterpolationMode",
+    "SmoothCacheConfig",
+    "smooth_cache_interpolate",
+    "smooth_cache_record",
     "teacache_should_compute",
     "teacache_update",
     "load_coefficients",

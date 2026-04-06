@@ -7,6 +7,7 @@ Scenario 3: VAE chunked decode
 
 import mlx.core as mx
 
+from mlx_diffusion_kit.cache.smooth_cache import InterpolationMode, SmoothCacheConfig
 from mlx_diffusion_kit.cache.teacache import TeaCacheConfig, load_coefficients
 from mlx_diffusion_kit.encoder.embedding_cache import TextEmbeddingCache
 from mlx_diffusion_kit.gating.tgate import TGateConfig
@@ -273,3 +274,107 @@ class TestVAEChunkedDecode:
         assert cache.num_cached() == 0
         for i in range(10):
             assert cache.get_state(i) is None
+
+
+# ---------------------------------------------------------------------------
+# Scenario 4 — Multi-step DiT with SmoothCache (TeaCache + interpolation)
+# ---------------------------------------------------------------------------
+
+
+class TestSmoothCacheIntegration:
+    """Verify SmoothCache interpolates skipped steps instead of reusing stale cache."""
+
+    def test_interpolated_output_differs_from_raw_cache(self):
+        """When TeaCache skips, SmoothCache should produce interpolated output
+        that differs from the raw cached_residual."""
+        # Setup: TeaCache (aggressive threshold) + SmoothCache LINEAR
+        cfg_with_smooth = OrchestratorConfig(
+            teacache=TeaCacheConfig(rel_l1_thresh=999.0, max_consecutive_cached=10),
+            smooth_cache=SmoothCacheConfig(mode=InterpolationMode.LINEAR),
+            is_single_step=False,
+        )
+        opt = DiffusionOptimizer(cfg_with_smooth)
+
+        dim = 32
+        n_tokens = 8
+
+        # Step 0: compute → features = 1.0
+        x0 = mx.ones((1, n_tokens, dim))
+        assert opt.should_compute_step(0, x0) is True
+        out0 = mx.ones((1, n_tokens, dim)) * 1.0
+        opt.update_step_cache(x0, out0, step_idx=0)
+
+        # Step 1: skip (threshold=999 → always skip after first)
+        x1 = mx.ones((1, n_tokens, dim)) * 1.001
+        assert opt.should_compute_step(1, x1) is False
+
+        # With only 1 history entry, smooth cache returns that entry
+        cached_1 = opt.get_cached_output(step_idx=1)
+        assert cached_1 is not None
+
+        # Force-compute step 5 to give SmoothCache a second data point
+        opt._teacache_state.accumulated_distance = 999.0  # Force compute
+        opt._teacache_state.consecutive_cached = 0
+        x5 = mx.ones((1, n_tokens, dim)) * 1.001
+        assert opt.should_compute_step(5, x5) is True
+        out5 = mx.ones((1, n_tokens, dim)) * 5.0
+        opt.update_step_cache(x5, out5, step_idx=5)
+
+        # Now skip step 7 — SmoothCache should interpolate between (0, 1.0) and (5, 5.0)
+        x7 = mx.ones((1, n_tokens, dim)) * 1.001
+        # Force the TeaCache state so it will skip
+        opt._teacache_state.accumulated_distance = 0.0
+        opt._teacache_state.consecutive_cached = 0
+        assert opt.should_compute_step(7, x7) is False
+
+        interpolated = opt.get_cached_output(step_idx=7)
+        raw_cached = opt.teacache_state.cached_residual
+
+        assert interpolated is not None
+        assert raw_cached is not None
+        # Interpolated should differ from raw cached residual
+        assert not mx.allclose(interpolated, raw_cached, atol=0.01), (
+            "SmoothCache interpolation should differ from raw TeaCache cache"
+        )
+
+    def test_smooth_cache_taylor_1_integration(self):
+        """Taylor-1 extrapolation should produce outputs that follow the trend."""
+        cfg = OrchestratorConfig(
+            teacache=TeaCacheConfig(rel_l1_thresh=999.0, max_consecutive_cached=10),
+            smooth_cache=SmoothCacheConfig(mode=InterpolationMode.TAYLOR_1),
+            is_single_step=False,
+        )
+        opt = DiffusionOptimizer(cfg)
+
+        # Record two computed steps with increasing features
+        x = mx.ones((1, 4, 16))
+        opt.should_compute_step(0, x)
+        opt.update_step_cache(x, mx.ones((1, 4, 16)) * 2.0, step_idx=0)
+
+        # Force compute for step 5
+        opt._teacache_state.accumulated_distance = 999.0
+        opt._teacache_state.consecutive_cached = 0
+        opt.should_compute_step(5, x)
+        opt.update_step_cache(x, mx.ones((1, 4, 16)) * 7.0, step_idx=5)
+
+        # Extrapolate to step 10: d1 = (7-2)/5 = 1.0/step, dt=5 → 7+5=12
+        output_10 = opt.get_cached_output(step_idx=10)
+        expected = mx.ones((1, 4, 16)) * 12.0
+        assert mx.allclose(output_10, expected, atol=1e-4)
+
+    def test_smooth_cache_reset(self):
+        """Reset should clear SmoothCache history."""
+        cfg = OrchestratorConfig(
+            teacache=TeaCacheConfig(),
+            smooth_cache=SmoothCacheConfig(),
+            is_single_step=False,
+        )
+        opt = DiffusionOptimizer(cfg)
+
+        x = mx.ones((1, 4, 8))
+        opt.should_compute_step(0, x)
+        opt.update_step_cache(x, x, step_idx=0)
+        assert len(opt.smooth_cache_state.history) == 1
+
+        opt.reset()
+        assert len(opt.smooth_cache_state.history) == 0

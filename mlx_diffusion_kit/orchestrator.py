@@ -13,6 +13,13 @@ from typing import Optional
 
 import mlx.core as mx
 
+from mlx_diffusion_kit.cache.smooth_cache import (
+    SmoothCacheConfig,
+    SmoothCacheState,
+    create_smooth_cache_state,
+    smooth_cache_interpolate,
+    smooth_cache_record,
+)
 from mlx_diffusion_kit.cache.teacache import (
     TeaCacheConfig,
     TeaCacheState,
@@ -56,6 +63,7 @@ class PISAConfig:
 @dataclass
 class OrchestratorConfig:
     teacache: Optional[TeaCacheConfig] = None
+    smooth_cache: Optional[SmoothCacheConfig] = None
     tome: Optional[ToMeConfig] = None
     tgate: Optional[TGateConfig] = None
     freeu: Optional[FreeUConfig] = None
@@ -87,6 +95,10 @@ class DiffusionOptimizer:
         self._tgate_state: Optional[TGateState] = None
         if self.config.tgate and not self.config.is_single_step:
             self._tgate_state = create_tgate_state()
+
+        self._smooth_cache_state: Optional[SmoothCacheState] = None
+        if self.config.smooth_cache and not self.config.is_single_step:
+            self._smooth_cache_state = create_smooth_cache_state()
 
         self._last_merge_info: Optional[MergeInfo] = None
         self._block_cache: dict[int, mx.array] = {}
@@ -163,18 +175,38 @@ class DiffusionOptimizer:
             modulated_input, step_idx, self.config.teacache, self._teacache_state
         )
 
-    def update_step_cache(self, modulated_input: mx.array, output: mx.array) -> None:
-        """Update TeaCache state after a computed step.
+    def update_step_cache(
+        self, modulated_input: mx.array, output: mx.array, step_idx: int = 0
+    ) -> None:
+        """Update TeaCache and SmoothCache state after a computed step.
 
         Args:
             modulated_input: The input that was computed.
             output: The model's output.
+            step_idx: Current step index (used by SmoothCache for interpolation).
         """
         if self._teacache_state is not None:
             teacache_update(modulated_input, output, self._teacache_state)
+        if self._smooth_cache_state is not None:
+            smooth_cache_record(step_idx, output, self._smooth_cache_state)
 
-    def get_cached_output(self) -> Optional[mx.array]:
-        """Retrieve the cached output for a skipped step."""
+    def get_cached_output(self, step_idx: int = 0) -> Optional[mx.array]:
+        """Retrieve output for a skipped step.
+
+        If SmoothCache is configured, returns interpolated features.
+        Otherwise, returns the raw TeaCache cached residual.
+
+        Args:
+            step_idx: The step being skipped (for SmoothCache interpolation).
+        """
+        if (
+            self._smooth_cache_state is not None
+            and self.config.smooth_cache is not None
+            and self._smooth_cache_state.history
+        ):
+            return smooth_cache_interpolate(
+                step_idx, self._smooth_cache_state, self.config.smooth_cache
+            )
         if self._teacache_state is not None:
             return self._teacache_state.cached_residual
         return None
@@ -247,11 +279,17 @@ class DiffusionOptimizer:
     def teacache_state(self) -> Optional[TeaCacheState]:
         return self._teacache_state
 
+    @property
+    def smooth_cache_state(self) -> Optional[SmoothCacheState]:
+        return self._smooth_cache_state
+
     def reset(self) -> None:
         """Reset all internal state for a new inference run."""
         if self._teacache_state is not None:
             self._teacache_state = create_teacache_state()
         if self._tgate_state is not None:
             self._tgate_state = create_tgate_state()
+        if self._smooth_cache_state is not None:
+            self._smooth_cache_state = create_smooth_cache_state()
         self._last_merge_info = None
         self._block_cache.clear()
