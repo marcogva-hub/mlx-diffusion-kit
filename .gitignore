@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+*.pyc
 *.egg-info/
 dist/
 build/
@@ -9,6 +10,7 @@ build/
 .mypy_cache/
 .ruff_cache/
 *.npz
+*.tmp
 debug/latents/
 debug/frames/
 debug/logs/
