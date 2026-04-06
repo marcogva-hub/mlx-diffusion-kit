@@ -19,4 +19,4 @@ def test_submodules_importable():
     from mlx_diffusion_kit.orchestrator import DiffusionOptimizer
 
     opt = DiffusionOptimizer()
-    assert opt.is_single_step is False
+    assert opt.config.is_single_step is False
