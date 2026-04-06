@@ -246,3 +246,24 @@
 
 ### Confidence
 - Overall: [HIGH]
+
+---
+## [2026-04-06 16:00] Phase P4.3: B14.1 DPM-Solver-v3
+
+### Plan
+- **Objective:** High-order ODE solver (orders 1-3) with log-SNR uniform timestep spacing
+- **Files to modify:** scheduler/dpm_solver_v3.py (new), scheduler/__init__.py, __init__.py
+
+### Changes made
+- `scheduler/dpm_solver_v3.py` — NoiseSchedule (VP, alpha_bar, log_snr, inverse_log_snr), DPMSolverV3Config, DPMSolverV3 (step, 1st/2nd/3rd order), compute_optimal_timesteps, predict_type conversion (epsilon/v/x_start) [HIGH]
+- `tests/test_dpm_solver_v3.py` — 11 tests: alpha_bar/log_snr monotonic, inverse roundtrip, timestep count, log-SNR uniform spacing, orders 1-3 finite, reset, predict_types [HIGH]
+
+### Tech cost assessment
+- NoiseSchedule init: O(T) cumprod (1000 betas). One-time.
+- inverse_log_snr: O(T log T) binary search per target value. Called once at init.
+- step: O(n) elementwise math per step. Negligible vs model forward.
+- Memory: model_output_history capped at 3 entries (order 3).
+
+### Confidence
+- Overall: [HIGH]
+- Risks: EMS coefficients (paper-specific) not yet implemented — current impl uses standard DPM-Solver multistep. EMS can be added as pre-calibrated per-model coefficients similar to TeaCache.
