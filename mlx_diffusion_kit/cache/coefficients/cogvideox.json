@@ -1,0 +1,6 @@
+{
+    "model": "CogVideoX",
+    "rel_l1_thresh": 0.3,
+    "poly_coeffs": [8.092438, -6.504696, 1.637915, -0.09498, 0.001356],
+    "notes": "From TeaCache paper, CogVideoX-5B, 50 steps DDIM"
+}
