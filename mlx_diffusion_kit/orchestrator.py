@@ -13,6 +13,14 @@ from typing import Optional
 
 import mlx.core as mx
 
+from mlx_diffusion_kit.cache.encoder_sharing import (
+    EncoderSharingConfig,
+    EncoderSharingState,
+    create_encoder_sharing_state,
+    encoder_sharing_get_cached,
+    encoder_sharing_should_recompute,
+    encoder_sharing_update,
+)
 from mlx_diffusion_kit.cache.smooth_cache import (
     SmoothCacheConfig,
     SmoothCacheState,
@@ -33,6 +41,7 @@ from mlx_diffusion_kit.gating.tgate import (
     create_tgate_state,
 )
 from mlx_diffusion_kit.quality.freeu import FreeUConfig
+from mlx_diffusion_kit.tokens.ddit_scheduling import DDiTScheduleConfig, DDiTScheduler
 from mlx_diffusion_kit.tokens.tome import (
     MergeInfo,
     ToMeConfig,
@@ -68,8 +77,11 @@ class OrchestratorConfig:
     tgate: Optional[TGateConfig] = None
     freeu: Optional[FreeUConfig] = None
     pisa: Optional[PISAConfig] = None
+    ddit_schedule: Optional[DDiTScheduleConfig] = None
+    encoder_sharing: Optional[EncoderSharingConfig] = None
     is_single_step: bool = False
     num_blocks: int = 24
+    total_steps: int = 50
 
 
 class DiffusionOptimizer:
@@ -99,6 +111,16 @@ class DiffusionOptimizer:
         self._smooth_cache_state: Optional[SmoothCacheState] = None
         if self.config.smooth_cache and not self.config.is_single_step:
             self._smooth_cache_state = create_smooth_cache_state()
+
+        self._encoder_sharing_state: Optional[EncoderSharingState] = None
+        if self.config.encoder_sharing and not self.config.is_single_step:
+            self._encoder_sharing_state = create_encoder_sharing_state()
+
+        self._ddit_scheduler: Optional[DDiTScheduler] = None
+        if self.config.ddit_schedule and not self.config.is_single_step:
+            self._ddit_scheduler = DDiTScheduler(
+                self.config.total_steps, self.config.ddit_schedule
+            )
 
         self._last_merge_info: Optional[MergeInfo] = None
         self._block_cache: dict[int, mx.array] = {}
@@ -283,6 +305,51 @@ class DiffusionOptimizer:
     def smooth_cache_state(self) -> Optional[SmoothCacheState]:
         return self._smooth_cache_state
 
+    @property
+    def encoder_sharing_state(self) -> Optional[EncoderSharingState]:
+        return self._encoder_sharing_state
+
+    @property
+    def ddit_scheduler(self) -> Optional[DDiTScheduler]:
+        return self._ddit_scheduler
+
+    # --- B22 Encoder Sharing ---
+
+    def should_recompute_encoder(self, step_idx: int) -> bool:
+        """Check whether shared encoder blocks need recomputing.
+
+        Returns True for single-step models or when encoder sharing is not configured.
+        """
+        if self.config.is_single_step:
+            return True
+        if self._encoder_sharing_state is None or self.config.encoder_sharing is None:
+            return True
+        return encoder_sharing_should_recompute(
+            step_idx, self.config.encoder_sharing, self._encoder_sharing_state
+        )
+
+    def get_cached_encoder_output(self) -> Optional[mx.array]:
+        """Retrieve cached encoder output."""
+        if self._encoder_sharing_state is not None:
+            return encoder_sharing_get_cached(self._encoder_sharing_state)
+        return None
+
+    def update_encoder_cache(self, step_idx: int, encoder_output: mx.array) -> None:
+        """Update encoder sharing cache after computing encoder blocks."""
+        if self._encoder_sharing_state is not None:
+            encoder_sharing_update(step_idx, encoder_output, self._encoder_sharing_state)
+
+    # --- B10 DDiT Scheduling ---
+
+    def get_patch_stride(self, step_idx: int) -> int:
+        """Get the dynamic patch stride for this step.
+
+        Returns 1 (full resolution) if DDiT scheduling is not configured.
+        """
+        if self._ddit_scheduler is None:
+            return 1
+        return self._ddit_scheduler.get_patch_stride(step_idx)
+
     def reset(self) -> None:
         """Reset all internal state for a new inference run."""
         if self._teacache_state is not None:
@@ -291,5 +358,7 @@ class DiffusionOptimizer:
             self._tgate_state = create_tgate_state()
         if self._smooth_cache_state is not None:
             self._smooth_cache_state = create_smooth_cache_state()
+        if self._encoder_sharing_state is not None:
+            self._encoder_sharing_state = create_encoder_sharing_state()
         self._last_merge_info = None
         self._block_cache.clear()

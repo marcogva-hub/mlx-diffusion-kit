@@ -1,5 +1,6 @@
 """Token-level optimizations: merging, pruning, sparsity (B7-B10)."""
 
+from mlx_diffusion_kit.tokens.ddit_scheduling import DDiTScheduleConfig, DDiTScheduler
 from mlx_diffusion_kit.tokens.learned_sparsity import DiffSparseConfig, DiffSparseRouter
 from mlx_diffusion_kit.tokens.tome import (
     MergeInfo,
@@ -10,6 +11,8 @@ from mlx_diffusion_kit.tokens.tome import (
 )
 
 __all__ = [
+    "DDiTScheduleConfig",
+    "DDiTScheduler",
     "DiffSparseConfig",
     "DiffSparseRouter",
     "MergeInfo",

@@ -1,5 +1,13 @@
-"""Step-level caching optimizations (B1-B6)."""
+"""Step-level caching optimizations (B1-B6, B22)."""
 
+from mlx_diffusion_kit.cache.encoder_sharing import (
+    EncoderSharingConfig,
+    EncoderSharingState,
+    create_encoder_sharing_state,
+    encoder_sharing_get_cached,
+    encoder_sharing_should_recompute,
+    encoder_sharing_update,
+)
 from mlx_diffusion_kit.cache.smooth_cache import (
     InterpolationMode,
     SmoothCacheConfig,
@@ -25,6 +33,13 @@ __all__ = [
     "load_coefficients",
     "teacache_should_compute",
     "teacache_update",
+    # B22 Encoder Sharing
+    "EncoderSharingConfig",
+    "EncoderSharingState",
+    "create_encoder_sharing_state",
+    "encoder_sharing_get_cached",
+    "encoder_sharing_should_recompute",
+    "encoder_sharing_update",
     # B4 SmoothCache
     "InterpolationMode",
     "SmoothCacheConfig",
