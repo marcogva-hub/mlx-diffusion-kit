@@ -341,3 +341,36 @@
 
 ### Confidence
 - Overall: [HIGH]
+
+---
+## [2026-04-06 20:00] Phase P5.1: B2 FBCache + B3 SpectralCache
+
+### Changes made
+- `cache/fbcache.py` — FBCacheConfig/State, fbcache_should_compute (rel_l1 on first block output), fbcache_update [HIGH]
+- `cache/spectral_cache.py` — SpectralCacheConfig/State, spectral_cache_should_compute (FFT-based HF change + sigma-adaptive thresholds + energy budget), spectral_cache_update [HIGH]
+- `orchestrator.py` — Added fbcache/spectral_cache configs + states, cascade priority in should_compute_step (TeaCache → SpectralCache → FBCache), update_step_cache updates all caches [HIGH]
+- `tests/test_fbcache.py` — 5 tests [HIGH]
+- `tests/test_spectral_cache.py` — 7 tests [HIGH]
+
+### Tech cost assessment
+- FBCache: One rel_l1 (O(n)) on first-block output only. Negligible.
+- SpectralCache: One rfft + magnitude + HF comparison per step. O(n log n) on last dim.
+
+### Confidence
+- Overall: [HIGH]
+
+---
+## [2026-04-06 20:30] Phase P5.2: B5 DeepCache + MosaicDiff
+
+### Changes made
+- `cache/deep_cache.py` — DeepCacheConfig/State, DeepCacheManager (auto-select middle layers, interval-based recompute), analyze_layer_redundancy (cosine/l2), select_cacheable_layers [HIGH]
+- `orchestrator.py` — Added deep_cache config + DeepCacheManager lifecycle + 3 new methods (should_compute_layer_deep, get_deep_cached_layer, update_deep_cache_layer) [HIGH]
+- `scripts/analyze_layer_redundancy.py` — Full CLI tool: load weights, analyze, recommend, save JSON [HIGH]
+- `tests/test_deep_cache.py` — 11 tests: auto-select, compute/skip intervals, roundtrip, reset, disabled, redundancy analysis, selection [HIGH]
+
+### Tech cost assessment
+- DeepCacheManager: O(1) per layer per step (set lookup + delta comparison)
+- analyze_layer_redundancy: O(n_layers × weight_size) cosine similarity. One-time analysis.
+
+### Confidence
+- Overall: [HIGH]
