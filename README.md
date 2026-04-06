@@ -2,7 +2,7 @@
 
 Inference optimizations for diffusion and video super-resolution models on MLX / Apple Silicon.
 
-Complements [mlx-mfa](https://github.com/your-org/mlx-mfa) (Flash Attention kernels) with everything outside the attention kernel: step caching, token merging/pruning, cross-attention gating, VAE optimization, scheduling, and orchestration.
+Complements [mlx-mfa](https://github.com/marcogva-hub/mlx-flashattention-steel) (Flash Attention kernels) with everything outside the attention kernel: step caching, token merging/pruning, cross-attention gating, VAE optimization, scheduling, and orchestration.
 
 ## Installation
 
