@@ -228,3 +228,21 @@ def test_attn_bias_integration():
     # Verify broadcast works
     fake_attn = mx.zeros((B, H, N_merged, N_merged)) + bias
     assert fake_attn.shape == (B, H, N_merged, N_merged)
+
+
+def test_lcsa_compatible_caps_ratio():
+    """lcsa_compatible should cap merge_ratio at 0.3."""
+    cfg = ToMeConfig(merge_ratio=0.5, lcsa_compatible=True)
+    tokens = mx.random.normal((1, 20, 32))
+    merged, info = tome_merge(tokens, cfg)
+    # With cap at 0.3: n_merge = int(20 * 0.3) = 6, so N_merged = 14
+    assert merged.shape[1] == 14
+
+
+def test_lcsa_compatible_passthrough_below_cap():
+    """lcsa_compatible with ratio <= 0.3 should work normally."""
+    cfg = ToMeConfig(merge_ratio=0.2, lcsa_compatible=True)
+    tokens = mx.random.normal((1, 20, 32))
+    merged, info = tome_merge(tokens, cfg)
+    # n_merge = int(20 * 0.2) = 4, N_merged = 16
+    assert merged.shape[1] == 16

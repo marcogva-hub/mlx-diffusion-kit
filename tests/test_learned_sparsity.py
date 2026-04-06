@@ -58,3 +58,31 @@ def test_minimum_one_token():
     tokens = mx.random.normal((1, 4, 16))
     selected, _ = router(tokens)
     assert selected.shape[1] >= 1
+
+
+def test_strict_mode_raises():
+    """strict=True without pretrained weights should raise RuntimeError."""
+    cfg = DiffSparseConfig(strict=True)
+    router = DiffSparseRouter(input_dim=32, config=cfg)
+    tokens = mx.random.normal((1, 8, 32))
+    with pytest.raises(RuntimeError, match="no pretrained weights"):
+        router(tokens)
+
+
+def test_non_strict_warns(caplog):
+    """strict=False should log a warning on first call."""
+    import logging
+
+    cfg = DiffSparseConfig(strict=False)
+    router = DiffSparseRouter(input_dim=32, config=cfg)
+    tokens = mx.random.normal((1, 8, 32))
+
+    with caplog.at_level(logging.WARNING):
+        router(tokens)
+    assert "no pretrained weights" in caplog.text
+
+    # Second call should NOT warn again
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        router(tokens)
+    assert "no pretrained weights" not in caplog.text

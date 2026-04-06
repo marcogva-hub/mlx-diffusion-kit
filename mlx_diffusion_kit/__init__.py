@@ -2,6 +2,7 @@
 
 from mlx_diffusion_kit.__version__ import __version__
 from mlx_diffusion_kit.cache.encoder_sharing import EncoderSharingConfig
+from mlx_diffusion_kit.maturity import Maturity, get_maturity, list_components
 from mlx_diffusion_kit.cache.multigranular import MultiGranularCache, MultiGranularConfig
 from mlx_diffusion_kit.cache.smooth_cache import (
     InterpolationMode,
@@ -94,4 +95,8 @@ __all__ = [
     "DiffusionOptimizer",
     "OrchestratorConfig",
     "PISAConfig",
+    # Maturity tracking
+    "Maturity",
+    "get_maturity",
+    "list_components",
 ]

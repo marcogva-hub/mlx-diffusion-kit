@@ -7,9 +7,14 @@ with norm-preserving MLERP and static output shapes for MLX compile stability.
 Reference: Bolya et al., "Token Merging: Your ViT But Faster" (ICLR 2023).
 """
 
+import logging
 from dataclasses import dataclass
 
 import mlx.core as mx
+
+logger = logging.getLogger(__name__)
+
+_LCSA_MAX_MERGE_RATIO = 0.3
 
 
 @dataclass
@@ -17,6 +22,7 @@ class ToMeConfig:
     merge_ratio: float = 0.5
     similarity: str = "cosine"
     use_mlerp: bool = True
+    lcsa_compatible: bool = False
     enabled: bool = True
 
 
@@ -80,7 +86,35 @@ def tome_merge(
 
     Returns:
         (merged_tokens, merge_info) where merged_tokens has N_merged = N - n_merge tokens.
+
+    Note on LCSA interaction (FlashVSR):
+        FlashVSR uses Local-Content Self-Attention (LCSA) with sparse patterns.
+        Token merging changes the token count, which affects LCSA's local window
+        boundaries. When using ToMe with FlashVSR:
+
+        - Set ``lcsa_compatible=True`` in ToMeConfig to cap merge_ratio at 0.3
+        - Provide ``spatial_dims`` for spatially-coherent merging
+        - The LCSA mask (``mlx_mfa.make_lcsa_mask``) must be recomputed after
+          merging with the new token count
+
+        This interaction has NOT been validated end-to-end. Use with caution.
     """
+    # LCSA compatibility guard
+    effective_ratio = config.merge_ratio
+    if config.lcsa_compatible:
+        if effective_ratio > _LCSA_MAX_MERGE_RATIO:
+            logger.warning(
+                "ToMe lcsa_compatible=True: capping merge_ratio from %.2f to %.2f",
+                effective_ratio,
+                _LCSA_MAX_MERGE_RATIO,
+            )
+            effective_ratio = _LCSA_MAX_MERGE_RATIO
+        if spatial_dims is None:
+            logger.warning(
+                "ToMe lcsa_compatible=True but spatial_dims not provided. "
+                "Spatial-coherent merging recommended for LCSA models."
+            )
+
     has_heads = tokens.ndim == 4
     if has_heads:
         B, H, N, D = tokens.shape
@@ -91,7 +125,7 @@ def tome_merge(
         H = 1
         tokens_flat = tokens
 
-    if not config.enabled or config.merge_ratio <= 0.0:
+    if not config.enabled or effective_ratio <= 0.0:
         # Passthrough — no merging
         info = MergeInfo(
             src_indices=mx.arange(N),
@@ -102,7 +136,7 @@ def tome_merge(
         )
         return tokens, info
 
-    n_merge = int(N * config.merge_ratio)
+    n_merge = int(N * effective_ratio)
     n_merge = min(n_merge, N // 2)  # Can't merge more than half
 
     if n_merge == 0:

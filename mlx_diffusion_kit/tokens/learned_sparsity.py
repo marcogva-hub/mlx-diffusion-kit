@@ -5,19 +5,27 @@ Successor to ToMe for single-step DiT (SeedVR2, DOVE, FlashVSR).
 Requires fine-tuning (~10K iterations) — this module provides the interface
 and a deterministic stub implementation.
 
+WITHOUT PRETRAINED WEIGHTS, this module operates in debug/testing mode only.
+The stub fallback keeps the first N tokens deterministically, which is
+spatially biased and will produce suboptimal results.
+
 Reference: Adapted from E-DiT / DiffSparse approaches.
 """
 
+import logging
 from dataclasses import dataclass
 
 import mlx.core as mx
 import mlx.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class DiffSparseConfig:
     budget: float = 0.5
     router_hidden_dim: int = 64
+    strict: bool = False
     enabled: bool = True
 
 
@@ -25,9 +33,16 @@ class DiffSparseRouter(nn.Module):
     """Per-layer token routing via learned MLP.
 
     The router predicts a keep-probability for each token. The top-k
-    tokens (by score) are retained. Requires pretrained weights for
-    meaningful routing; without them, falls back to keeping the first
-    budget*N tokens deterministically.
+    tokens (by score) are retained.
+
+    Without pretrained weights (the default state), behavior depends on
+    the ``strict`` config flag:
+
+    - ``strict=True``: raises RuntimeError. Use this in production pipelines
+      to catch missing weights early.
+    - ``strict=False`` (default): falls back to keeping the first budget*N
+      tokens deterministically with a one-time warning. This is for
+      testing/debugging only — results will be spatially biased.
     """
 
     def __init__(self, input_dim: int, config: DiffSparseConfig | None = None):
@@ -42,6 +57,7 @@ class DiffSparseRouter(nn.Module):
             nn.Linear(self.config.router_hidden_dim, 1),
         )
         self._pretrained = False
+        self._warned = False
 
     def __call__(self, tokens: mx.array) -> tuple[mx.array, mx.array]:
         """Route tokens: select top-budget fraction by routing score.
@@ -53,6 +69,9 @@ class DiffSparseRouter(nn.Module):
             (selected_tokens, routing_scores) where:
                 selected_tokens: [B, N_kept, D]
                 routing_scores: [B, N] raw routing logits
+
+        Raises:
+            RuntimeError: If strict=True and no pretrained weights are loaded.
         """
         if not self.config.enabled:
             scores = mx.zeros(tokens.shape[:2])
@@ -62,7 +81,17 @@ class DiffSparseRouter(nn.Module):
         n_keep = max(1, int(N * self.config.budget))
 
         if not self._pretrained:
-            # Stub: keep first n_keep tokens with zero scores
+            if self.config.strict:
+                raise RuntimeError(
+                    "DiffSparse router has no pretrained weights. "
+                    "Load weights with from_pretrained() or set strict=False for debug fallback."
+                )
+            if not self._warned:
+                logger.warning(
+                    "DiffSparse: no pretrained weights loaded. Using deterministic fallback "
+                    "(keeps first N tokens). This is for testing only — results will be suboptimal."
+                )
+                self._warned = True
             return tokens[:, :n_keep, :], mx.zeros((B, N))
 
         # Full routing with learned weights
