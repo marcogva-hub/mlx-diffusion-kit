@@ -13,6 +13,7 @@ from typing import Optional
 
 import mlx.core as mx
 
+from mlx_diffusion_kit.cache.deep_cache import DeepCacheConfig, DeepCacheManager
 from mlx_diffusion_kit.cache.fbcache import (
     FBCacheConfig,
     FBCacheState,
@@ -94,6 +95,7 @@ class OrchestratorConfig:
     tgate: Optional[TGateConfig] = None
     freeu: Optional[FreeUConfig] = None
     pisa: Optional[PISAConfig] = None
+    deep_cache: Optional[DeepCacheConfig] = None
     multigranular: Optional[MultiGranularConfig] = None
     ddit_schedule: Optional[DDiTScheduleConfig] = None
     encoder_sharing: Optional[EncoderSharingConfig] = None
@@ -146,6 +148,12 @@ class DiffusionOptimizer:
         if self.config.ddit_schedule and not self.config.is_single_step:
             self._ddit_scheduler = DDiTScheduler(
                 self.config.total_steps, self.config.ddit_schedule
+            )
+
+        self._deep_cache: Optional[DeepCacheManager] = None
+        if self.config.deep_cache and not self.config.is_single_step:
+            self._deep_cache = DeepCacheManager(
+                self.config.num_blocks, self.config.deep_cache
             )
 
         self._multigranular: Optional[MultiGranularCache] = None
@@ -430,6 +438,30 @@ class DiffusionOptimizer:
         return self._ddit_scheduler.get_patch_stride(step_idx)
 
     @property
+    def deep_cache_manager(self) -> Optional[DeepCacheManager]:
+        return self._deep_cache
+
+    def should_compute_layer_deep(self, layer_idx: int, step_idx: int) -> bool:
+        """Check if a UNet layer should be computed (DeepCache).
+
+        Returns True if DeepCache is not configured or for non-cached layers.
+        """
+        if self._deep_cache is None:
+            return True
+        return self._deep_cache.should_compute_layer(layer_idx, step_idx)
+
+    def get_deep_cached_layer(self, layer_idx: int) -> Optional[mx.array]:
+        """Retrieve DeepCache cached output for a layer."""
+        if self._deep_cache is None:
+            return None
+        return self._deep_cache.get_cached_layer(layer_idx)
+
+    def update_deep_cache_layer(self, layer_idx: int, step_idx: int, output: mx.array) -> None:
+        """Update DeepCache for a layer."""
+        if self._deep_cache is not None:
+            self._deep_cache.update_layer(layer_idx, step_idx, output)
+
+    @property
     def fbcache_state(self) -> Optional[FBCacheState]:
         return self._fbcache_state
 
@@ -451,6 +483,8 @@ class DiffusionOptimizer:
             self._smooth_cache_state = create_smooth_cache_state()
         if self._encoder_sharing_state is not None:
             self._encoder_sharing_state = create_encoder_sharing_state()
+        if self._deep_cache is not None:
+            self._deep_cache.reset()
         if self._multigranular is not None:
             self._multigranular.clear()
         self._last_merge_info = None

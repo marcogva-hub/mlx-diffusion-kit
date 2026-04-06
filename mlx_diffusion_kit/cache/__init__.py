@@ -1,5 +1,11 @@
 """Step-level caching optimizations (B1-B6, B22)."""
 
+from mlx_diffusion_kit.cache.deep_cache import (
+    DeepCacheConfig,
+    DeepCacheManager,
+    analyze_layer_redundancy,
+    select_cacheable_layers,
+)
 from mlx_diffusion_kit.cache.fbcache import (
     FBCacheConfig,
     FBCacheState,
@@ -51,6 +57,11 @@ from mlx_diffusion_kit.cache.teacache import (
 )
 
 __all__ = [
+    # B5 DeepCache
+    "DeepCacheConfig",
+    "DeepCacheManager",
+    "analyze_layer_redundancy",
+    "select_cacheable_layers",
     # B2 FBCache
     "FBCacheConfig",
     "FBCacheState",
