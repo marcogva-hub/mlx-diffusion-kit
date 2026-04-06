@@ -323,3 +323,21 @@
 
 ### Confidence
 - Overall: [HIGH]
+
+---
+## [2026-04-06 19:00] Phase P6.2: DiffSparse guard + maturity + docs + LCSA
+
+### Plan
+- **Objective:** Library-quality improvements: production guards, maturity tracking, docs, LCSA interaction handling
+
+### Changes made
+- `tokens/learned_sparsity.py` — Added strict mode (RuntimeError) + one-time warning for non-pretrained fallback [HIGH]
+- `maturity.py` — New module: Maturity enum, COMPONENT_MATURITY registry, get_maturity(), list_components() [HIGH]
+- `cache/coefficients/README.md` — TeaCache coefficient format documentation [HIGH]
+- `tokens/tome.py` — lcsa_compatible flag in ToMeConfig, caps merge_ratio at 0.3 with warning, LCSA docstring note [HIGH]
+- `tests/test_learned_sparsity.py` — +2 tests: strict raises, non-strict warns once [HIGH]
+- `tests/test_maturity.py` — 5 tests: known/unknown components, all/filtered listing [HIGH]
+- `tests/test_tome.py` — +2 tests: LCSA cap, LCSA passthrough below cap [HIGH]
+
+### Confidence
+- Overall: [HIGH]
