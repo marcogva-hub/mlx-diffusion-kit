@@ -83,10 +83,31 @@ def test_get_cached_empty():
 
 
 def test_interval_1_always_recomputes():
-    """Interval=1 means recompute every step."""
+    """Interval=1 means recompute every step (delta >= 1 always true for next step)."""
     cfg = EncoderSharingConfig(recompute_interval=1)
     state = create_encoder_sharing_state()
 
-    encoder_sharing_update(0, mx.ones((2, 4)), state)
-    for step in range(10):
+    for step in range(5):
         assert encoder_sharing_should_recompute(step, cfg, state) is True
+        encoder_sharing_update(step, mx.ones((2, 4)), state)
+
+
+def test_non_sequential_steps_with_skips():
+    """Delta-based recompute handles TeaCache-skipped steps correctly."""
+    cfg = EncoderSharingConfig(recompute_interval=3)
+    state = create_encoder_sharing_state()
+
+    # Step 0: recompute (no cache)
+    assert encoder_sharing_should_recompute(0, cfg, state) is True
+    encoder_sharing_update(0, mx.ones((2, 4)), state)
+
+    # Steps 1, 2 skipped by TeaCache, step 4 is next computed
+    # delta = 4 - 0 = 4 >= 3 → recompute
+    assert encoder_sharing_should_recompute(4, cfg, state) is True
+    encoder_sharing_update(4, mx.ones((2, 4)) * 2.0, state)
+
+    # Step 5: delta = 5 - 4 = 1 < 3 → cache
+    assert encoder_sharing_should_recompute(5, cfg, state) is False
+
+    # Step 7: delta = 7 - 4 = 3 >= 3 → recompute
+    assert encoder_sharing_should_recompute(7, cfg, state) is True

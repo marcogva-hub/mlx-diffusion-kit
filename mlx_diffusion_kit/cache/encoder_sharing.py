@@ -40,10 +40,13 @@ def encoder_sharing_should_recompute(
 ) -> bool:
     """Decide whether to recompute the encoder blocks for this step.
 
+    Uses delta-based logic (steps since last compute) instead of modulo,
+    which breaks when TeaCache skips non-sequential steps.
+
     Returns True if:
       - Encoder sharing is disabled
       - No cached output exists yet
-      - step_idx is on a recompute boundary (step_idx % interval == 0)
+      - Enough steps have elapsed since last compute (delta >= interval)
 
     Args:
         step_idx: Current denoising step index.
@@ -59,7 +62,7 @@ def encoder_sharing_should_recompute(
     if state.cached_encoder_output is None:
         return True
 
-    return step_idx % config.recompute_interval == 0
+    return step_idx - state.last_computed_step >= config.recompute_interval
 
 
 def encoder_sharing_get_cached(state: EncoderSharingState) -> Optional[mx.array]:
