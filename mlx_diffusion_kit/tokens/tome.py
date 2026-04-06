@@ -64,12 +64,19 @@ def _mlerp(a: mx.array, b: mx.array, ratio: float = 0.5) -> mx.array:
 def tome_merge(
     tokens: mx.array,
     config: ToMeConfig,
+    spatial_dims: tuple[int, int, int] | None = None,
+    spatial_weight: float = 0.3,
+    temporal_weight: float = 0.5,
 ) -> tuple[mx.array, MergeInfo]:
     """Merge similar tokens via bipartite cosine matching.
 
     Args:
         tokens: Input tokens [B, N, D] or [B, H, N, D].
         config: ToMe configuration.
+        spatial_dims: Optional (T, H, W) for video-aware spatiotemporal scoring.
+            When provided, similarity combines cosine + spatial/temporal proximity.
+        spatial_weight: Weight for spatial proximity (0-1). Only used with spatial_dims.
+        temporal_weight: Weight for temporal proximity (0-1). Only used with spatial_dims.
 
     Returns:
         (merged_tokens, merge_info) where merged_tokens has N_merged = N - n_merge tokens.
@@ -125,7 +132,17 @@ def tome_merge(
     dst_tokens_match = match_tokens[:1, n_src:n_src + n_dst, :]  # [1, n_dst, D]
 
     # Compute similarity
-    if config.similarity == "cosine":
+    if spatial_dims is not None:
+        sim = compute_spatiotemporal_similarity(
+            match_tokens[:1],
+            spatial_dims,
+            spatial_weight=spatial_weight,
+            temporal_weight=temporal_weight,
+            config=config,
+        )
+        # Extract dst×src submatrix from full [1, N, N]
+        sim = sim[:, n_src:n_src + n_dst, :n_src]
+    elif config.similarity == "cosine":
         sim = _cosine_similarity(dst_tokens_match, src_tokens_match)  # [1, n_dst, n_src]
     else:
         sim = _l2_similarity(dst_tokens_match, src_tokens_match)
@@ -248,3 +265,93 @@ def compute_proportional_bias(info: MergeInfo) -> mx.array:
     counts = counts.at[info.merge_assignments].add(mx.ones((n_dst,)))
 
     return mx.log(counts)
+
+
+def compute_spatiotemporal_similarity(
+    tokens: mx.array,
+    spatial_dims: tuple[int, int, int],
+    spatial_weight: float = 0.3,
+    temporal_weight: float = 0.5,
+    config: ToMeConfig | None = None,
+) -> mx.array:
+    """Compute similarity combining cosine semantics + spatiotemporal proximity.
+
+    For video models (9 of 11 VSR targets), tokens have structure [T, H, W].
+    Pure cosine can merge spatially distant tokens; this adds proximity bias
+    to encourage merging nearby tokens for spatially coherent regions.
+
+    Final similarity = (1 - sw - tw) * cosine + sw * spatial_prox + tw * temporal_prox
+
+    Args:
+        tokens: Input tokens [B, N, D] where N = T*H*W.
+        spatial_dims: (T, H, W) structure of the token grid.
+        spatial_weight: Weight for 2D spatial proximity (0-1).
+        temporal_weight: Weight for temporal proximity (0-1).
+        config: Optional ToMeConfig (for similarity type fallback).
+
+    Returns:
+        Similarity matrix [B, N, N].
+    """
+    B, N, D = tokens.shape
+    T, H, W = spatial_dims
+
+    # Cosine similarity: [B, N, N]
+    t_norm = tokens / (mx.linalg.norm(tokens, axis=-1, keepdims=True) + 1e-8)
+    cosine_sim = t_norm @ mx.transpose(t_norm, (0, 2, 1))
+
+    # Build coordinate grids for each token position
+    # Token i corresponds to (t, h, w) = (i//(H*W), (i%(H*W))//W, i%W)
+    indices = mx.arange(N)
+    hw = H * W
+    t_coords = (indices // hw).astype(mx.float32)  # [N]
+    h_coords = ((indices % hw) // W).astype(mx.float32)
+    w_coords = (indices % W).astype(mx.float32)
+
+    # Spatial distance: Euclidean in (h, w) space
+    h_diff = mx.expand_dims(h_coords, 0) - mx.expand_dims(h_coords, 1)  # [N, N]
+    w_diff = mx.expand_dims(w_coords, 0) - mx.expand_dims(w_coords, 1)
+    spatial_dist = mx.sqrt(h_diff * h_diff + w_diff * w_diff + 1e-8)
+    spatial_prox = 1.0 / (1.0 + spatial_dist)  # [N, N]
+
+    # Temporal distance: |t_i - t_j|
+    t_diff = mx.abs(mx.expand_dims(t_coords, 0) - mx.expand_dims(t_coords, 1))
+    temporal_prox = 1.0 / (1.0 + t_diff)  # [N, N]
+
+    # Expand proximity matrices for batch dimension
+    spatial_prox = mx.expand_dims(spatial_prox, 0)  # [1, N, N]
+    temporal_prox = mx.expand_dims(temporal_prox, 0)
+
+    cosine_weight = 1.0 - spatial_weight - temporal_weight
+    sim = cosine_weight * cosine_sim + spatial_weight * spatial_prox + temporal_weight * temporal_prox
+
+    return sim
+
+
+def compute_attn_bias_for_mfa(info: MergeInfo) -> mx.array:
+    """Build an attn_bias compatible with mlx-mfa for proportional attention.
+
+    When tokens are merged, the resulting token represents >1 original token.
+    Attention must weight merged tokens proportionally: tokens that represent
+    more original tokens should receive proportionally more attention.
+
+    The bias is log-additive: added to attention logits before softmax.
+    bias[i] = log(count[i]) where count is how many original tokens token i represents.
+
+    Output shape [1, 1, 1, N_merged] broadcasts with flash_attention's [B, H, N_q, N_kv].
+
+    Usage with mlx-mfa::
+
+        from mlx_mfa import flash_attention
+        merged_tokens, info = tome_merge(tokens, config)
+        q, k, v = compute_qkv(merged_tokens)
+        bias = compute_attn_bias_for_mfa(info)
+        attn_out = flash_attention(q, k, v, attn_bias=bias)
+
+    Args:
+        info: MergeInfo from tome_merge.
+
+    Returns:
+        attn_bias [1, 1, 1, N_merged] ready for flash_attention(attn_bias=...).
+    """
+    bias = compute_proportional_bias(info)  # [N_merged]
+    return bias.reshape(1, 1, 1, -1)

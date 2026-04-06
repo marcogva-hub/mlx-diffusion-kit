@@ -28,7 +28,11 @@ from mlx_diffusion_kit.scheduler.adaptive_stepping import AdaptiveStepConfig, Ad
 from mlx_diffusion_kit.scheduler.dpm_solver_v3 import DPMSolverV3, DPMSolverV3Config, NoiseSchedule
 from mlx_diffusion_kit.tokens.ddit_scheduling import DDiTScheduleConfig, DDiTScheduler
 from mlx_diffusion_kit.tokens.learned_sparsity import DiffSparseConfig, DiffSparseRouter
-from mlx_diffusion_kit.tokens.tome import ToMeConfig, tome_merge, tome_unmerge, compute_proportional_bias
+from mlx_diffusion_kit.tokens.pruning import ToPiConfig, topi_prune, topi_restore
+from mlx_diffusion_kit.tokens.tome import (
+    ToMeConfig, tome_merge, tome_unmerge,
+    compute_proportional_bias, compute_attn_bias_for_mfa, compute_spatiotemporal_similarity,
+)
 from mlx_diffusion_kit.vae.wavelet_cache import WaveletCacheConfig, WaveletVAECache, chunked_decode_with_cache
 
 __all__ = [
@@ -51,6 +55,12 @@ __all__ = [
     "tome_merge",
     "tome_unmerge",
     "compute_proportional_bias",
+    "compute_attn_bias_for_mfa",
+    "compute_spatiotemporal_similarity",
+    # B8 ToPi
+    "ToPiConfig",
+    "topi_prune",
+    "topi_restore",
     # B9 DiffSparse
     "DiffSparseConfig",
     "DiffSparseRouter",
