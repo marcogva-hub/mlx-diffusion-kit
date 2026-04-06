@@ -148,6 +148,7 @@
 ### Plan
 - **Objective:** Skip redundant diffusion steps based on output convergence
 - **Files to modify:** scheduler/adaptive_stepping.py (new), scheduler/__init__.py
+- **Files to modify:** scheduler/adaptive_stepping.py (new), scheduler/__init__.py
 
 ### Changes made
 - `scheduler/adaptive_stepping.py` — AdaptiveStepConfig, AdaptiveStepScheduler [HIGH]
@@ -156,6 +157,43 @@
 ### Tech cost assessment
 - Compute: One MSE per step = O(n). Negligible vs model forward.
 - Memory: Set of skipped indices. O(num_steps).
+
+### Confidence
+- Overall: [HIGH]
+
+---
+## [2026-04-06 13:00] Phase P3.1: B23 Orchestrator + PISA
+
+### Plan
+- **Objective:** Central orchestrator composing TeaCache, ToMe, T-GATE, PISA with BlockStrategy enum
+- **Files to modify:** orchestrator.py (rewrite from stub), tests/test_smoke.py (fix API change)
+
+### Changes made
+- `orchestrator.py` — Full rewrite: BlockStrategy, PISAConfig, OrchestratorConfig, DiffusionOptimizer [HIGH]
+- `tests/test_orchestrator.py` — 11 tests [HIGH]
+- `tests/test_smoke.py:L22` — Fixed for new API [HIGH]
+
+### Dependency & regression check
+- Imports from cache, gating, quality, tokens — all verified compatible
+
+### Confidence
+- Overall: [HIGH]
+
+---
+## [2026-04-06 13:10] Phase P3.2: B9 DiffSparse (stub)
+
+### Changes made
+- `tokens/learned_sparsity.py` — DiffSparseConfig, DiffSparseRouter(nn.Module) stub [HIGH]
+- `tests/test_learned_sparsity.py` — 6 tests [HIGH]
+
+### Confidence
+- Overall: [HIGH]
+
+---
+## [2026-04-06 13:20] Phase P_int: Integration tests
+
+### Changes made
+- `tests/test_integration.py` — 12 tests across 3 scenarios (multi-step, single-step, VAE) [HIGH]
 
 ### Confidence
 - Overall: [HIGH]
