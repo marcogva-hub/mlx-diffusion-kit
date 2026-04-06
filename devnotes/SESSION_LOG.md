@@ -221,3 +221,28 @@
 
 ### Confidence
 - Overall: [HIGH]
+
+---
+## [2026-04-06 15:00] Phase P4.2: B10 DDiT Scheduling + B22 Encoder Sharing
+
+### Plan
+- **Objective:** Dynamic patch scheduling per step + encoder block sharing across steps
+- **Files to modify:** tokens/ddit_scheduling.py (new), cache/encoder_sharing.py (new), orchestrator.py, cache/__init__.py, tokens/__init__.py
+
+### Changes made
+- `tokens/ddit_scheduling.py` — DDiTScheduleConfig, DDiTScheduler with linear/cosine/step schedules, power-of-2 stride quantization [HIGH]
+- `cache/encoder_sharing.py` — EncoderSharingConfig/State, should_recompute, get_cached, update [HIGH]
+- `orchestrator.py` — Added ddit_schedule + encoder_sharing configs, DDiTScheduler + EncoderSharingState init, 4 new methods (should_recompute_encoder, get_cached_encoder_output, update_encoder_cache, get_patch_stride) [HIGH]
+- `tests/test_ddit_scheduling.py` — 8 tests: linear/cosine/step schedules, powers of 2, reduction factor 2D/3D, disabled, warmup=0 [HIGH]
+- `tests/test_encoder_sharing.py` — 7 tests: first step, interval=3, update/get, overwrite, disabled, empty, interval=1 [HIGH]
+
+### Dependency & regression check
+- orchestrator.py: OrchestratorConfig got `ddit_schedule`, `encoder_sharing`, `total_steps` fields with None/50 defaults — backward compatible
+- All existing 97 tests pass without modification (new fields are Optional with defaults)
+
+### Tech cost assessment
+- DDiT: O(1) per step (math.cos + nearest_power_of_2)
+- Encoder sharing: O(1) decision per step, one mx.array cached (size = encoder output)
+
+### Confidence
+- Overall: [HIGH]
