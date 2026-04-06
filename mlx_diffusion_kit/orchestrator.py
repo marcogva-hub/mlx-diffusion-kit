@@ -19,6 +19,7 @@ from mlx_diffusion_kit.attention.ditfastattn import (
     HeadStrategy,
 )
 from mlx_diffusion_kit.cache.deep_cache import DeepCacheConfig, DeepCacheManager
+from mlx_diffusion_kit.cache.motion import MotionConfig, MotionTracker
 from mlx_diffusion_kit.cache.fbcache import (
     FBCacheConfig,
     FBCacheState,
@@ -132,6 +133,14 @@ class DiffusionOptimizer:
         if self.config.teacache and not self.config.is_single_step:
             self._teacache_state = create_teacache_state()
 
+        self._motion_tracker: Optional[MotionTracker] = None
+        if (
+            self.config.teacache
+            and self.config.teacache.motion
+            and not self.config.is_single_step
+        ):
+            self._motion_tracker = MotionTracker(self.config.teacache.motion)
+
         self._fbcache_state: Optional[FBCacheState] = None
         if self.config.fbcache and not self.config.is_single_step:
             self._fbcache_state = create_fbcache_state()
@@ -244,6 +253,7 @@ class DiffusionOptimizer:
         modulated_input: mx.array,
         first_block_output: Optional[mx.array] = None,
         sigma_t: float = 0.5,
+        frame: Optional[mx.array] = None,
     ) -> bool:
         """Check if the full model forward should run for this step.
 
@@ -259,6 +269,7 @@ class DiffusionOptimizer:
             modulated_input: Timestep-modulated input tensor.
             first_block_output: Output of first transformer block (for FBCache).
             sigma_t: Current noise level 0→1 (for SpectralCache).
+            frame: Current video frame (for WorldCache motion adjustment).
 
         Returns:
             True if the step should be computed, False to reuse cache.
@@ -266,10 +277,22 @@ class DiffusionOptimizer:
         if self.config.is_single_step:
             return True
 
-        # Priority 1: TeaCache
+        # Priority 1: TeaCache (with optional motion adjustment)
         if self._teacache_state is not None and self.config.teacache is not None:
+            cfg = self.config.teacache
+            if self._motion_tracker is not None and frame is not None:
+                self._motion_tracker.update(frame)
+                adjusted = self._motion_tracker.get_adjusted_threshold(cfg.rel_l1_thresh)
+                # Temporarily override threshold for this call
+                original = cfg.rel_l1_thresh
+                cfg.rel_l1_thresh = adjusted
+                result = teacache_should_compute(
+                    modulated_input, step_idx, cfg, self._teacache_state
+                )
+                cfg.rel_l1_thresh = original
+                return result
             return teacache_should_compute(
-                modulated_input, step_idx, self.config.teacache, self._teacache_state
+                modulated_input, step_idx, cfg, self._teacache_state
             )
 
         # Priority 2: SpectralCache
@@ -490,6 +513,10 @@ class DiffusionOptimizer:
             self._deep_cache.update_layer(layer_idx, step_idx, output)
 
     @property
+    def motion_tracker(self) -> Optional[MotionTracker]:
+        return self._motion_tracker
+
+    @property
     def fbcache_state(self) -> Optional[FBCacheState]:
         return self._fbcache_state
 
@@ -501,6 +528,8 @@ class DiffusionOptimizer:
         """Reset all internal state for a new inference run."""
         if self._teacache_state is not None:
             self._teacache_state = create_teacache_state()
+        if self._motion_tracker is not None:
+            self._motion_tracker.reset()
         if self._fbcache_state is not None:
             self._fbcache_state = create_fbcache_state()
         if self._spectral_cache_state is not None:

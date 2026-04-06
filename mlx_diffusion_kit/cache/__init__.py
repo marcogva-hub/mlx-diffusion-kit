@@ -1,5 +1,12 @@
 """Step-level caching optimizations (B1-B6, B22)."""
 
+from mlx_diffusion_kit.cache.motion import (
+    MotionConfig,
+    MotionTracker,
+    estimate_motion,
+    motion_adjusted_threshold,
+    warp_features_by_motion,
+)
 from mlx_diffusion_kit.cache.deep_cache import (
     DeepCacheConfig,
     DeepCacheManager,

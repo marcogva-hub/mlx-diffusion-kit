@@ -11,9 +11,12 @@ for Video Diffusion Model" (CVPR 2025 Highlight).
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import mlx.core as mx
+
+if TYPE_CHECKING:
+    from mlx_diffusion_kit.cache.motion import MotionConfig
 
 
 @dataclass
@@ -23,6 +26,7 @@ class TeaCacheConfig:
     start_step: int = 0
     end_step: Optional[int] = None
     max_consecutive_cached: int = 5
+    motion: Optional["MotionConfig"] = None
     enabled: bool = True
 
 
