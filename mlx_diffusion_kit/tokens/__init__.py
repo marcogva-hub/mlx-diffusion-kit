@@ -1,5 +1,6 @@
 """Token-level optimizations: merging, pruning, sparsity (B7-B10)."""
 
+from mlx_diffusion_kit.tokens.learned_sparsity import DiffSparseConfig, DiffSparseRouter
 from mlx_diffusion_kit.tokens.tome import (
     MergeInfo,
     ToMeConfig,
@@ -9,6 +10,8 @@ from mlx_diffusion_kit.tokens.tome import (
 )
 
 __all__ = [
+    "DiffSparseConfig",
+    "DiffSparseRouter",
     "MergeInfo",
     "ToMeConfig",
     "compute_proportional_bias",
