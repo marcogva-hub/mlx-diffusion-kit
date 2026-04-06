@@ -101,3 +101,61 @@
 ### Confidence
 - Overall: [HIGH]
 - Risks: Polynomial coefficients are model-specific. CogVideoX verified from paper. Other models need calibration.
+
+---
+## [2026-04-06 12:00] Phase P2.1: B8 Token Merging (ToMe)
+
+### Plan
+- **Objective:** Bipartite cosine matching → merge similar tokens (N→N/2)
+- **Files to modify:** tokens/tome.py (new), tokens/__init__.py
+
+### Changes made
+- `tokens/tome.py` — ToMeConfig, MergeInfo, tome_merge, tome_unmerge, compute_proportional_bias [HIGH]
+  - Bipartite partition (first n_src = src, rest = dst), cosine sim matching
+  - MLERP norm-preserving merge, 3D and 4D (B,H,N,D) support
+- `tests/test_tome.py` — 11 tests: merge/unmerge shape, ratio 0/0.5, identical/different tokens, proportional bias, MLERP norms, batch sizes, disabled, 4D, finite [HIGH]
+
+### Tech cost assessment
+- Compute: O(n_dst × n_src) similarity + O(n_dst) argmax per merge. For N=4096, ratio=0.5 → 2048×2048 sim matrix.
+- Memory: similarity matrix n_dst × n_src. Temporary, freed after merge.
+- Note: scatter-add loop in merge is O(n_dst) Python — acceptable for now, future optimization with mx.scatter_add if profiled as bottleneck.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: Python loop in merge step. Profile-driven optimization path identified.
+
+---
+## [2026-04-06 12:10] Phase P2.2: B17 WF-VAE Causal Cache
+
+### Plan
+- **Objective:** Conv state propagation for chunked temporal VAE decoding
+- **Files to modify:** vae/wavelet_cache.py (new), vae/__init__.py
+
+### Changes made
+- `vae/wavelet_cache.py` — WaveletCacheConfig, WaveletVAECache, chunked_decode_with_cache [HIGH]
+- `tests/test_wavelet_cache.py` — 9 tests: get/set, clear, max layers, disabled, state propagation, empty/single chunk [HIGH]
+
+### Tech cost assessment
+- Memory: One mx.array per cached conv layer. For 30 conv layers with typical hidden dims → modest.
+- Compute: Dict lookup per layer per chunk. O(1).
+
+### Confidence
+- Overall: [HIGH]
+
+---
+## [2026-04-06 12:20] Phase P2.3: B14.2 Adaptive Stepping
+
+### Plan
+- **Objective:** Skip redundant diffusion steps based on output convergence
+- **Files to modify:** scheduler/adaptive_stepping.py (new), scheduler/__init__.py
+
+### Changes made
+- `scheduler/adaptive_stepping.py` — AdaptiveStepConfig, AdaptiveStepScheduler [HIGH]
+- `tests/test_adaptive_stepping.py` — 6 tests: identical skip, different no-skip, min_steps, reset, effective timesteps, disabled [HIGH]
+
+### Tech cost assessment
+- Compute: One MSE per step = O(n). Negligible vs model forward.
+- Memory: Set of skipped indices. O(num_steps).
+
+### Confidence
+- Overall: [HIGH]
