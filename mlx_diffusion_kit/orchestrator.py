@@ -13,6 +13,11 @@ from typing import Optional
 
 import mlx.core as mx
 
+from mlx_diffusion_kit.attention.ditfastattn import (
+    DiTFastAttnConfig,
+    DiTFastAttnManager,
+    HeadStrategy,
+)
 from mlx_diffusion_kit.cache.deep_cache import DeepCacheConfig, DeepCacheManager
 from mlx_diffusion_kit.cache.fbcache import (
     FBCacheConfig,
@@ -97,6 +102,7 @@ class OrchestratorConfig:
     freeu: Optional[FreeUConfig] = None
     pisa: Optional[PISAConfig] = None
     toca: Optional[ToCaConfig] = None
+    ditfastattn: Optional[DiTFastAttnConfig] = None
     deep_cache: Optional[DeepCacheConfig] = None
     multigranular: Optional[MultiGranularConfig] = None
     ddit_schedule: Optional[DDiTScheduleConfig] = None
@@ -155,6 +161,14 @@ class DiffusionOptimizer:
         self._toca: Optional[TokenCacheManager] = None
         if self.config.toca and not self.config.is_single_step:
             self._toca = TokenCacheManager(self.config.toca)
+
+        self._ditfastattn: Optional[DiTFastAttnManager] = None
+        if self.config.ditfastattn and not self.config.is_single_step:
+            self._ditfastattn = DiTFastAttnManager(
+                self.config.num_blocks,
+                self.config.num_blocks,  # num_heads — overridden by config if needed
+                self.config.ditfastattn,
+            )
 
         self._deep_cache: Optional[DeepCacheManager] = None
         if self.config.deep_cache and not self.config.is_single_step:
@@ -448,6 +462,10 @@ class DiffusionOptimizer:
         return self._toca
 
     @property
+    def ditfastattn_manager(self) -> Optional[DiTFastAttnManager]:
+        return self._ditfastattn
+
+    @property
     def deep_cache_manager(self) -> Optional[DeepCacheManager]:
         return self._deep_cache
 
@@ -495,6 +513,8 @@ class DiffusionOptimizer:
             self._encoder_sharing_state = create_encoder_sharing_state()
         if self._toca is not None:
             self._toca.reset()
+        if self._ditfastattn is not None:
+            self._ditfastattn.reset()
         if self._deep_cache is not None:
             self._deep_cache.reset()
         if self._multigranular is not None:
