@@ -123,3 +123,21 @@ def test_outputs_finite():
     assert mx.all(mx.isfinite(merged)).item()
     unmerged = tome_unmerge(merged, info)
     assert mx.all(mx.isfinite(unmerged)).item()
+
+
+def test_performance_n1000():
+    """tome_merge on N=1000 should complete in under 1s (vectorized)."""
+    import time
+
+    cfg = ToMeConfig(merge_ratio=0.5)
+    tokens = mx.random.normal((1, 1000, 64))
+    # Force materialization of input
+    _ = tokens.sum().item()
+
+    start = time.perf_counter()
+    merged, info = tome_merge(tokens, cfg)
+    # Force materialization of output
+    _ = merged.sum().item()
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 1.0, f"tome_merge(N=1000) took {elapsed:.2f}s, expected < 1s"

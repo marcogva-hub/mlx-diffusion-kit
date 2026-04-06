@@ -146,20 +146,22 @@ def tome_merge(
     else:
         merged_dst = (matched_src + dst_tok) / 2.0
 
-    # Scatter merged values back into src positions
-    # For each assignment, we update the src token with the merged value
-    # Build output: start with src tokens, then update with merged values
-    output = mx.array(src_tok)  # copy
+    # Vectorized scatter-add: accumulate merged_dst into src positions
+    # Count how many dst tokens map to each src
+    dst_per_src = mx.zeros((n_src,))
+    dst_per_src = dst_per_src.at[assignments].add(mx.ones((n_dst,)))
 
-    # Accumulate merges into src tokens
-    # Use a loop-free approach: for each unique src, average all merges
-    # Since multiple dst can map to same src, we need scatter-add
+    # Weighted average: (src + sum_of_merged_dst) / (1 + count)
+    total_count = 1.0 + dst_per_src  # [n_src]
+    count_scale = mx.expand_dims(total_count, (0, -1))  # [1, n_src, 1]
+
+    # Scatter-add merged_dst contributions into src positions per batch
     BH = tokens_flat.shape[0]
+    contrib = mx.zeros_like(src_tok)  # [BH, n_src, D]
     for b in range(BH):
-        for d in range(n_dst):
-            src_pos = assignments[d].item()
-            # Running average: blend current src with merged value
-            output[b, src_pos] = (output[b, src_pos] + merged_dst[b, d]) / 2.0
+        contrib = contrib.at[b, assignments].add(merged_dst[b])
+
+    output = (src_tok + contrib) / count_scale
 
     if has_heads:
         output = output.reshape(B, H, n_src, D)
@@ -240,10 +242,9 @@ def compute_proportional_bias(info: MergeInfo) -> mx.array:
     if info.dst_indices.size == 0:
         return mx.zeros((info.original_n,))
 
-    # Count how many dst tokens map to each src
+    # Vectorized: count assignments without Python loops
+    n_dst = info.merge_assignments.shape[0]
     counts = mx.ones((n_src,))
-    for d in range(info.merge_assignments.shape[0]):
-        src_pos = info.merge_assignments[d].item()
-        counts[src_pos] = counts[src_pos] + 1.0
+    counts = counts.at[info.merge_assignments].add(mx.ones((n_dst,)))
 
     return mx.log(counts)
