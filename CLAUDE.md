@@ -161,7 +161,20 @@ mlx_diffusion_kit/
 
 ## Key technical decisions
 
-*(To be updated as implementation progresses)*
+- **Vectorized scatter-add** — ToMe uses `mx.array.at[].add()` for GPU-native accumulation. No Python `.item()` loops in hot paths.
+- **Delta-based recompute** — Encoder sharing uses `step_idx - last_computed >= interval` instead of modulo, robust to TeaCache-skipped steps.
+- **Atomic cache writes** — TextEmbeddingCache writes via tmp+rename to prevent corruption on crash.
+- **Cascade step-cache priority** — Orchestrator: TeaCache > SpectralCache > FBCache (first configured wins).
+- **LCSA compatibility** — ToMe caps merge_ratio at 0.3 when `lcsa_compatible=True` for FlashVSR.
+- **DiffSparse strict guard** — `strict=True` raises RuntimeError without pretrained weights to prevent silent fallback.
+- **Motion-adjusted threshold** — WorldCache formula: `threshold / (1 + sensitivity * motion_magnitude)`.
+
+## Current implementation status
+
+- **46 public exports** in `__init__.py`
+- **21 components** (9 STABLE, 9 BETA, 2 EXPERIMENTAL, 3 STUB)
+- **245+ tests** across 25 test files
+- **2 functional scripts** (calibrate_teacache.py, analyze_layer_redundancy.py)
 
 ## Output constraint — MANDATORY
 NEVER produce a monolithic response exceeding 20000 tokens.

@@ -1,3 +1,6 @@
+> **Historical note:** This session log records the development of mlx-diffusion-kit v0.1.0,
+> built over a single session on 2026-04-06. All phases (P0 through P6.2) are documented below.
+
 ---
 ## [2026-04-06 11:00] Phase P0: Repo scaffolding
 

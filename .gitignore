@@ -11,8 +11,4 @@ build/
 .ruff_cache/
 *.npz
 *.tmp
-debug/latents/
-debug/frames/
-debug/logs/
-outputs/
 .DS_Store
