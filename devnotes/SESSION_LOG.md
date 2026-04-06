@@ -197,3 +197,27 @@
 
 ### Confidence
 - Overall: [HIGH]
+
+---
+## [2026-04-06 14:00] Phase P4.1: B4 SmoothCache + Taylor interpolation
+
+### Plan
+- **Objective:** Interpolation for skipped steps (Linear, Taylor-1, Taylor-2)
+- **Files to modify:** cache/smooth_cache.py (new), orchestrator.py, cache/__init__.py, __init__.py, test_integration.py
+
+### Changes made
+- `cache/smooth_cache.py` — InterpolationMode enum, SmoothCacheConfig, SmoothCacheState, smooth_cache_record, smooth_cache_interpolate with 3 modes [HIGH]
+- `orchestrator.py` — Added smooth_cache to OrchestratorConfig, SmoothCacheState init, record in update_step_cache, interpolate in get_cached_output [HIGH]
+- `tests/test_smooth_cache.py` — 12 tests: linear exact, Taylor-1 exact, Taylor-2 parabola, fallback, pruning, disabled, empty, finite, shapes [HIGH]
+- `tests/test_integration.py` — 3 new SmoothCache scenarios (interpolated differs from raw, Taylor-1 extrapolation, reset) [HIGH]
+
+### Dependency & regression check
+- orchestrator.py: `update_step_cache` and `get_cached_output` got `step_idx` parameter with default=0 — backward compatible [HIGH]
+- All 23 existing orchestrator/integration tests pass without modification
+
+### Tech cost assessment
+- Compute: Linear interpolation O(n) elementwise. Taylor-1/2 same + 1-2 divisions.
+- Memory: History buffer capped at 3 entries = 3× one feature tensor. Constant regardless of step count.
+
+### Confidence
+- Overall: [HIGH]
