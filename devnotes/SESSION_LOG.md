@@ -267,3 +267,34 @@
 ### Confidence
 - Overall: [HIGH]
 - Risks: EMS coefficients (paper-specific) not yet implemented — current impl uses standard DPM-Solver multistep. EMS can be added as pre-calibrated per-model coefficients similar to TeaCache.
+
+---
+## [2026-04-06 17:00] Phase P4.4: B6 Multi-Granular Cache
+
+### Plan
+- **Objective:** BWCache (bandwidth-aware allocation) + UniCP (unified policy) + QuantCache (int8/int4 compression)
+- **Files to modify:** cache/multigranular.py (new), orchestrator.py, cache/__init__.py
+
+### Changes made
+- `cache/multigranular.py` — 3 components + unified MultiGranularCache class [HIGH]
+  - BWCacheAllocator: budget-aware per-layer step allocation, prefer_quality mode
+  - UniCPPolicy: 3-signal decision (TeaCache distance, SmoothCache interpolation, BW budget)
+  - QuantCache: int8/int4 per-channel/per-tensor compress/decompress
+  - MultiGranularCache: pipeline combining all 3 + stats tracking
+- `orchestrator.py` — Added multigranular config + MultiGranularCache lifecycle + property + reset [HIGH]
+- `tests/test_multigranular.py` — 21 tests across all components [HIGH]
+
+### Dependency & regression check
+- Imports SmoothCache concepts (interpolation) by reference in UniCP, no direct code dependency
+- orchestrator.py: MultiGranularConfig added to OrchestratorConfig with None default — backward compatible
+- All 123 existing tests pass
+
+### Tech cost assessment
+- BWCache allocation: O(n_layers log n_layers) sort. One-time at init.
+- UniCP decide: O(1) per (layer, step) pair.
+- QuantCache compress: O(n) per tensor + one max reduction. Decompress: O(n) multiply.
+- Memory: int8 = 50% of f16, int4 = 25% of f16 (packed as int8 in current impl, true int4 packing future).
+
+### Confidence
+- Overall: [HIGH]
+- Note: int4 uses int8 dtype with reduced range (clamp to [-7,7]). True 4-bit packing would halve memory further but requires bitwise ops.
