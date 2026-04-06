@@ -189,6 +189,36 @@ def test_composition_multi_step():
     assert opt.should_compute_cross_attn(0, 5) is False
 
 
+def test_skip_strategy_when_block_cached():
+    """get_block_strategy should return SKIP when block is cached and TeaCache has residual."""
+    cfg = OrchestratorConfig(
+        teacache=TeaCacheConfig(),
+        is_single_step=False,
+    )
+    opt = DiffusionOptimizer(cfg)
+
+    # Manually populate block cache and TeaCache residual
+    opt._block_cache[0] = mx.ones((2, 4))
+    opt._teacache_state.cached_residual = mx.ones((2, 4))
+
+    assert opt.get_block_strategy(0, 5) == BlockStrategy.SKIP
+    # Block not in cache → COMPUTE
+    assert opt.get_block_strategy(1, 5) == BlockStrategy.COMPUTE
+
+
+def test_skip_not_returned_single_step():
+    """Single-step models should never get SKIP strategy."""
+    cfg = OrchestratorConfig(
+        teacache=TeaCacheConfig(),
+        is_single_step=True,
+    )
+    opt = DiffusionOptimizer(cfg)
+
+    # Even if we manually put something in block_cache, single-step → no SKIP
+    opt._block_cache[0] = mx.ones((2, 4))
+    assert opt.get_block_strategy(0, 5) == BlockStrategy.COMPUTE
+
+
 def test_reset():
     """Reset should clear all internal state."""
     cfg = OrchestratorConfig(

@@ -175,8 +175,7 @@ class DiffusionOptimizer:
             and self._teacache_state is not None
             and self._teacache_state.cached_residual is not None
         ):
-            # TeaCache already decided to skip at step level — propagate
-            pass
+            return BlockStrategy.SKIP
 
         # APPROXIMATE: PISA — low-sensitivity blocks
         pisa = self.config.pisa
