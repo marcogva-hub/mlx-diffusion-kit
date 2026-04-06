@@ -1,5 +1,16 @@
 """Step-level caching optimizations (B1-B6, B22)."""
 
+from mlx_diffusion_kit.cache.multigranular import (
+    BWCacheConfig,
+    BWCacheAllocator,
+    MultiGranularCache,
+    MultiGranularConfig,
+    QuantCacheConfig,
+    UniCPConfig,
+    UniCPPolicy,
+    quantcache_compress,
+    quantcache_decompress,
+)
 from mlx_diffusion_kit.cache.encoder_sharing import (
     EncoderSharingConfig,
     EncoderSharingState,
@@ -40,6 +51,16 @@ __all__ = [
     "encoder_sharing_get_cached",
     "encoder_sharing_should_recompute",
     "encoder_sharing_update",
+    # B6 Multi-Granular Cache
+    "BWCacheConfig",
+    "BWCacheAllocator",
+    "MultiGranularCache",
+    "MultiGranularConfig",
+    "QuantCacheConfig",
+    "UniCPConfig",
+    "UniCPPolicy",
+    "quantcache_compress",
+    "quantcache_decompress",
     # B4 SmoothCache
     "InterpolationMode",
     "SmoothCacheConfig",

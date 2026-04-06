@@ -13,6 +13,7 @@ from typing import Optional
 
 import mlx.core as mx
 
+from mlx_diffusion_kit.cache.multigranular import MultiGranularCache, MultiGranularConfig
 from mlx_diffusion_kit.cache.encoder_sharing import (
     EncoderSharingConfig,
     EncoderSharingState,
@@ -77,6 +78,7 @@ class OrchestratorConfig:
     tgate: Optional[TGateConfig] = None
     freeu: Optional[FreeUConfig] = None
     pisa: Optional[PISAConfig] = None
+    multigranular: Optional[MultiGranularConfig] = None
     ddit_schedule: Optional[DDiTScheduleConfig] = None
     encoder_sharing: Optional[EncoderSharingConfig] = None
     is_single_step: bool = False
@@ -120,6 +122,16 @@ class DiffusionOptimizer:
         if self.config.ddit_schedule and not self.config.is_single_step:
             self._ddit_scheduler = DDiTScheduler(
                 self.config.total_steps, self.config.ddit_schedule
+            )
+
+        self._multigranular: Optional[MultiGranularCache] = None
+        if self.config.multigranular and self.config.multigranular.enabled:
+            mg = self.config.multigranular
+            self._multigranular = MultiGranularCache(
+                bw_config=mg.bw,
+                unicp_config=mg.unicp,
+                quant_config=mg.quant,
+                layer_shapes=mg.layer_shapes,
             )
 
         self._last_merge_info: Optional[MergeInfo] = None
@@ -310,6 +322,10 @@ class DiffusionOptimizer:
         return self._encoder_sharing_state
 
     @property
+    def multigranular_cache(self) -> Optional[MultiGranularCache]:
+        return self._multigranular
+
+    @property
     def ddit_scheduler(self) -> Optional[DDiTScheduler]:
         return self._ddit_scheduler
 
@@ -360,5 +376,7 @@ class DiffusionOptimizer:
             self._smooth_cache_state = create_smooth_cache_state()
         if self._encoder_sharing_state is not None:
             self._encoder_sharing_state = create_encoder_sharing_state()
+        if self._multigranular is not None:
+            self._multigranular.clear()
         self._last_merge_info = None
         self._block_cache.clear()
