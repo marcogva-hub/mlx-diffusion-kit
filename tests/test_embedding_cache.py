@@ -60,3 +60,25 @@ def test_clear(cache):
 
 def test_cache_size_empty(cache):
     assert cache.cache_size() == 0
+
+
+def test_different_encoder_id_different_key(cache):
+    """Same prompt with different encoder_id should produce separate cache entries."""
+    calls = []
+    enc = _make_encoder(calls)
+
+    cache.get_or_compute("upscale 4x", enc, encoder_id="t5-xxl")
+    cache.get_or_compute("upscale 4x", enc, encoder_id="clip-l")
+    assert len(calls) == 2
+    assert cache.cache_size() == 2
+
+
+def test_same_encoder_id_same_key(cache):
+    """Same prompt + same encoder_id should cache hit."""
+    calls = []
+    enc = _make_encoder(calls)
+
+    cache.get_or_compute("upscale 4x", enc, encoder_id="t5-xxl")
+    cache.get_or_compute("upscale 4x", enc, encoder_id="t5-xxl")
+    assert len(calls) == 1
+    assert cache.cache_size() == 1
