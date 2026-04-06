@@ -398,3 +398,37 @@
 
 ### Confidence
 - Overall: [HIGH]
+
+---
+## [2026-04-06 22:00] Phase P5.5: WorldCache Motion-Aware Extension
+
+### Changes made
+- `cache/motion.py` — MotionConfig/State, estimate_motion (l1_diff + gradient + block_matching), Sobel filter, motion_adjusted_threshold, estimate_motion_vector (CoM), warp_features_by_motion (integer shift), MotionTracker class [HIGH]
+- `cache/teacache.py` — Added optional `motion: MotionConfig` field to TeaCacheConfig [HIGH]
+- `orchestrator.py` — MotionTracker lifecycle, motion-adjusted threshold in should_compute_step, `frame` parameter, property + reset [HIGH]
+- `tests/test_motion.py` — 13 tests: zero/high motion, gradient edge detection, threshold adjustment, warp shift, tracker history/reset [HIGH]
+
+### Tech cost assessment
+- estimate_motion: O(H×W) for l1_diff, O(H×W) for gradient (Sobel is 3×3 conv → O(H×W))
+- motion_adjusted_threshold: O(1)
+- warp_features_by_motion: O(H×W) array slicing
+
+### Confidence
+- Overall: [HIGH]
+
+---
+## [2026-04-06 22:30] Phase P5.6: Functional Scripts + VAE Streaming
+
+### Changes made
+- `scripts/calibrate_teacache.py` — Full offline calibration: load features, compute L1 distances, polynomial fit via numpy, threshold selection by target skip ratio [HIGH]
+- `vae/wavelet_cache.py` — Added output_buffer mode (in-place write), callback mode (per-chunk notification), estimate_output_shape, preallocate_output_buffer [HIGH]
+- `tests/test_calibrate_teacache.py` — 3 tests: synthetic calibration, JSON output, too-few-files error [HIGH]
+- `tests/test_analyze_redundancy.py` — 3 tests: identical/mixed weights, selection [HIGH]
+- `tests/test_wavelet_cache.py` — +4 tests: buffer mode, callback mode, shape estimation, temporal upsample [HIGH]
+
+### Tech cost assessment
+- Calibration: O(S × N) where S=steps, N=feature size. One-time offline operation.
+- Buffer mode: zero extra memory vs concat mode (no intermediate list).
+
+### Confidence
+- Overall: [HIGH]

@@ -44,7 +44,7 @@ COMPONENT_MATURITY: dict[str, Maturity] = {
     "B19_DecoderDistill": Maturity.STUB,
     "B22_EncoderSharing": Maturity.BETA,
     "B23_Orchestrator": Maturity.STABLE,
-    "WorldCache_Motion": Maturity.STUB,
+    "WorldCache_Motion": Maturity.EXPERIMENTAL,
 }
 
 
