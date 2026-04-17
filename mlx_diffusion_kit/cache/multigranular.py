@@ -7,7 +7,7 @@ Builds on B1 (TeaCache) and B4 (SmoothCache) for decision signals
 and interpolation fallback.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import mlx.core as mx

@@ -7,7 +7,7 @@ into a unified decision layer. Three modes per transformer block per step:
   APPROXIMATE — PISA lightweight approximation (identity + scale)
 """
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Optional
 
@@ -34,13 +34,12 @@ from mlx_diffusion_kit.cache.deep_cache import (
     deepcache_should_recompute,
     deepcache_store,
 )
-from mlx_diffusion_kit.cache.motion import MotionConfig, MotionTracker
+from mlx_diffusion_kit.cache.motion import MotionTracker
 from mlx_diffusion_kit.cache.fb_cache import (
     FBCacheConfig,
     FBCacheState,
     create_fbcache_state,
     fbcache_reconstruct,
-    fbcache_reset,
     fbcache_should_compute_remaining,
     fbcache_update,
 )

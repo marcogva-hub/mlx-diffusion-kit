@@ -11,7 +11,7 @@ scheduler directly — it provides optimal timesteps and stepping logic
 to be integrated into the inference pipeline.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import mlx.core as mx

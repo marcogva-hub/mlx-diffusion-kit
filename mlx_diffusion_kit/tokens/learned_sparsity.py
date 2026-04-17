@@ -56,6 +56,10 @@ class DiffSparseRouter(nn.Module):
             nn.GELU(),
             nn.Linear(self.config.router_hidden_dim, 1),
         )
+        # TODO(future): flip to True when from_pretrained() loads real
+        # router weights. No current API toggles this flag, so the
+        # learned routing branch below is intentionally unreachable
+        # until the weights-loading path lands.
         self._pretrained = False
         self._warned = False
 

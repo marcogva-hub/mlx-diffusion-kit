@@ -81,15 +81,12 @@ class FBCacheState:
             decision.
         cached_residual: ``full_output - first_block_output`` from the
             most recent compute step. Reused when the decision says skip.
-        step_counter: Monotonic counter of ``should_compute`` calls,
-            currently informational.
         consecutive_cached: Number of consecutive cache reuses since the
-            last real compute.
+            last real compute. Gates ``max_consecutive_cached``.
     """
 
     prev_fb_output: Optional[mx.array] = None
     cached_residual: Optional[mx.array] = None
-    step_counter: int = 0
     consecutive_cached: int = 0
 
 
@@ -118,8 +115,6 @@ def fbcache_should_compute_remaining(
     This function also **mutates** ``state.consecutive_cached`` — it is
     incremented on a cache reuse and reset on a compute.
     """
-    state.step_counter += 1
-
     if not config.enabled:
         state.consecutive_cached = 0
         return True
@@ -202,5 +197,4 @@ def fbcache_reset(state: FBCacheState) -> None:
     """Clear state for a new inference run."""
     state.prev_fb_output = None
     state.cached_residual = None
-    state.step_counter = 0
     state.consecutive_cached = 0

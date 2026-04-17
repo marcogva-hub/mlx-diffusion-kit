@@ -174,7 +174,6 @@ def test_reset_clears_state():
     fbcache_reset(state)
     assert state.prev_fb_output is None
     assert state.cached_residual is None
-    assert state.step_counter == 0
     assert state.consecutive_cached == 0
 
 

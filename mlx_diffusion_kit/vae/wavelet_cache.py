@@ -8,7 +8,7 @@ Training-free, purely architectural optimization.
 Estimated impact: -4 to -6% end-to-end on SeedVR2.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 import mlx.core as mx
