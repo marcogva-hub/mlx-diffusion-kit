@@ -531,3 +531,28 @@
 ### Confidence
 - Overall: [HIGH]
 - Risks: model wrappers that previously received "skip everything" from FBCache now get "skip remaining blocks" semantics. If any user relied on the prior (incorrect) behavior, their code breaks. Acceptable because the prior behavior was wrong per the paper.
+
+---
+## [2026-04-07 09:30] Phase P7.3: B7 ToCa rebuild
+
+### Plan
+- **Objective:** Replace single-step global cosine caching with per-layer velocity-based token caching per Zou et al.
+- **Files to modify:** `tokens/toca.py` (rewrite), `tokens/__init__.py`, `orchestrator.py`; `tests/test_toca.py` (rewrite).
+
+### Changes made
+- `tokens/toca.py` — rewrite. New API: `ToCaConfig{recompute_ratio, score_mode, enabled}`, per-layer `ToCaLayerState{cached_tokens, prev_tokens, step_count}`, top-level `ToCaState{layers: dict[int, ...]}`. Functions: `create_toca_state`, `toca_select_tokens` (returns `(active_indices, cached_indices)`, sorted by position), `toca_compose` (reassembles `[B, N, D]` from disjoint active+cached pieces), `toca_update` (shifts `prev ← cached`, `cached ← tokens`), `toca_get_cached`, `toca_reset`. Score modes: `"velocity"` needs 2-step history, `"magnitude"` works from step 1. Fallback to all-active when history is insufficient. [HIGH]
+- `tokens/__init__.py` — export new API, drop `TokenCacheManager`. [HIGH]
+- `orchestrator.py` — `TokenCacheManager` references replaced with function-based API: `toca_select`, `toca_record`, `toca_compose_tokens`, `toca_state` property. State storage is `_toca_state: Optional[ToCaState]`. [HIGH]
+- `tests/test_toca.py` — 13 new tests: first-call all-active, velocity mode needs 2 updates, velocity partitioning with crafted trajectory, disjoint union covers N, compose reconstructs correctly, compose with empty cached, per-layer independence, magnitude mode from step 1, disabled passthrough, update shifts history, get_cached Noneness, reset clears. [HIGH]
+
+### Dependency & regression check
+- grep for `TokenCacheManager`, `self._toca[^_]` → no matches outside orchestrator internals (now updated).
+- Full test suite: 258 pass (previously 255 — net +3; test count jumped from 9 to 13 but some integration tests cover overlapping ground). No regressions.
+
+### Tech cost assessment
+- Compute: per decision, one mean-abs per token (O(N·D)) + one argsort (O(N log N)). No Python batch loops in selection. Compose has a small batch loop for scatter-add (B typically 1-8).
+- Memory: per layer, 2 × `[B, N, D]` tensors (cached + prev). For 24-layer DiT with B=1, N=4096, D=1024: ~200 MB. Documented as the tradeoff.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: the compose function uses a per-batch Python loop for scatter-add. Acceptable because B is small; matches existing ToPi and ToMe patterns. If profiled as a bottleneck, a vectorized `at[]` path via flat batch offsets is possible.

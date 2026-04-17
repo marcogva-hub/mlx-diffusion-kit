@@ -1,179 +1,250 @@
-"""B7 — ToCa (Token Caching): Per-token caching between denoising steps.
+"""B7 — ToCa: Token-wise Feature Caching across diffusion steps.
 
-Caches individual tokens that change little between steps and only recomputes
-tokens that have significantly changed. Complementary to ToMe (B8) which
-reduces tokens within a step, while ToCa reduces recomputation across steps.
+Algorithm (Zou et al.):
+    Between denoising steps, different tokens evolve at different rates.
+    Tokens corresponding to stable regions of the latent change slowly;
+    tokens in high-motion or high-detail regions change quickly.
 
-Applicable to 6 multi-step models.
-All operations are fully vectorized — no .item() calls or Python loops.
+    ToCa scores tokens by their **velocity** — the L1 change between the
+    two most recent computed step outputs at this layer — then recomputes
+    only the top-fraction by velocity (the "active" set) and reuses
+    cached features for the rest (the "cached" set).
+
+    Scoring modes:
+      * ``"velocity"`` (default) — requires ≥ 2 prior cached steps. Score =
+        ``||curr - prev|| / ||prev||`` per token.
+      * ``"magnitude"`` — uses the current token's L2 norm. Available from
+        step 1 onward and useful when no prior computed step exists yet.
+
+    When history is insufficient for the chosen mode, the selection
+    falls back to "all active" — a safe no-op that matches what the
+    caller would do without ToCa.
+
+Per-layer state:
+    Each transformer block has independent token dynamics, so the cache
+    is keyed by ``layer_idx``. A single ToCaState holds the per-layer
+    history dicts.
+
+Orthogonality:
+    ToCa is independent of B8 ToMe. ToMe merges similar tokens **within
+    a step**; ToCa caches tokens **across steps**. They compose: ToMe
+    first reduces N → N/2 per step, then ToCa reduces further by only
+    recomputing the fast-moving subset of those N/2 tokens.
+
+Applies to: multi-step DiT models (SparkVSR, STAR, Vivid-VR).
+
+Reference: Zou et al., "Accelerating Diffusion Transformers with
+    Token-wise Feature Caching" (ToCa).
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 import mlx.core as mx
 
 
 @dataclass
 class ToCaConfig:
-    cache_ratio: float = 0.3
-    similarity_threshold: float = 0.95
-    recompute_interval: int = 5
-    use_attention_scores: bool = True
+    """Configuration for ToCa.
+
+    Attributes:
+        recompute_ratio: Fraction of tokens to recompute each step. 0.5
+            means half are recomputed, half are reused from cache.
+        score_mode: ``"velocity"`` (requires 2-step history) or
+            ``"magnitude"`` (requires only current tokens).
+        enabled: Master switch.
+    """
+
+    recompute_ratio: float = 0.5
+    score_mode: Literal["velocity", "magnitude"] = "velocity"
     enabled: bool = True
 
 
 @dataclass
-class ToCaState:
-    cached_tokens: Optional[mx.array] = None
-    cached_mask: Optional[mx.array] = None
-    last_full_step: int = -1
+class ToCaLayerState:
+    """Per-layer ToCa state: history of computed-step token tensors.
 
-
-class TokenCacheManager:
-    """Manages per-token caching across denoising steps.
-
-    Identifies which tokens are stable (cacheable) vs dynamic (must recompute)
-    using cosine similarity and optional attention-score prioritization.
+    Attributes:
+        cached_tokens: Most recent full-block output tokens for this
+            layer (shape ``[B, N, D]``). None before first compute.
+        prev_tokens: Full-block output tokens from the step before
+            ``cached_tokens`` (also ``[B, N, D]``). Needed for velocity.
+        step_count: Number of times this layer's cache has been updated.
     """
 
-    def __init__(self, config: Optional[ToCaConfig] = None):
-        self.config = config or ToCaConfig()
-        self._state = ToCaState()
+    cached_tokens: Optional[mx.array] = None
+    prev_tokens: Optional[mx.array] = None
+    step_count: int = 0
 
-    def identify_stable_tokens(
-        self,
-        current_tokens: mx.array,
-        step_idx: int,
-        attention_scores: Optional[mx.array] = None,
-    ) -> mx.array:
-        """Identify tokens to cache vs recompute.
 
-        Args:
-            current_tokens: Current step's tokens [B, N, D].
-            step_idx: Current denoising step.
-            attention_scores: Optional [B, H, N, N] or [B, N, N] attention weights.
+@dataclass
+class ToCaState:
+    """Per-layer ToCa state container."""
 
-        Returns:
-            Boolean mask [B, N]: True = stable (use cache), False = dynamic (recompute).
-        """
-        B, N, D = current_tokens.shape
+    layers: dict[int, ToCaLayerState] = field(default_factory=dict)
 
-        if not self.config.enabled:
-            return mx.zeros((B, N), dtype=mx.bool_)
+    def layer(self, layer_idx: int) -> ToCaLayerState:
+        """Get (or lazily create) the state for a layer."""
+        s = self.layers.get(layer_idx)
+        if s is None:
+            s = ToCaLayerState()
+            self.layers[layer_idx] = s
+        return s
 
-        # Force full recompute conditions
-        if self._state.cached_tokens is None:
-            return mx.zeros((B, N), dtype=mx.bool_)
 
-        if step_idx - self._state.last_full_step >= self.config.recompute_interval:
-            return mx.zeros((B, N), dtype=mx.bool_)
+def create_toca_state() -> ToCaState:
+    """Create a fresh ToCaState for a new inference run."""
+    return ToCaState()
 
-        # Cosine similarity between current and cached tokens
-        cached = self._state.cached_tokens
-        cur_norm = mx.linalg.norm(current_tokens, axis=-1, keepdims=True) + 1e-8
-        cac_norm = mx.linalg.norm(cached, axis=-1, keepdims=True) + 1e-8
-        cos_sim = mx.sum(
-            (current_tokens / cur_norm) * (cached / cac_norm), axis=-1
-        )  # [B, N]
 
-        # Base stability mask: tokens above similarity threshold
-        stable_mask = cos_sim >= self.config.similarity_threshold  # [B, N]
+def _token_scores(
+    current_tokens: mx.array,
+    layer_state: ToCaLayerState,
+    mode: str,
+) -> Optional[mx.array]:
+    """Per-token score of shape ``[B, N]`` (higher = needs recompute), or None
+    if history is insufficient for the chosen mode."""
+    if mode == "velocity":
+        if layer_state.cached_tokens is None or layer_state.prev_tokens is None:
+            return None
+        # Velocity from the two most recent computed steps at this layer.
+        delta = layer_state.cached_tokens - layer_state.prev_tokens
+        # Per-token L1 change, normalized by magnitude of prev token so that
+        # low-magnitude tokens don't dominate.
+        abs_delta = mx.mean(mx.abs(delta), axis=-1)  # [B, N]
+        prev_mag = mx.mean(mx.abs(layer_state.prev_tokens), axis=-1) + 1e-6  # [B, N]
+        return abs_delta / prev_mag
+    elif mode == "magnitude":
+        # Available from step 1 (we just need current tokens).
+        return mx.mean(mx.abs(current_tokens), axis=-1)  # [B, N]
+    else:
+        raise ValueError(f"Unknown score_mode: {mode}")
 
-        # If using attention scores, deprioritize high-attention tokens
-        # (high-attention tokens are more "influential" → riskier to cache)
-        if self.config.use_attention_scores and attention_scores is not None:
-            # Sum attention received (column sum) → importance per token
-            if attention_scores.ndim == 4:
-                # [B, H, N, N] → [B, N] via column sum then head mean
-                importance = mx.mean(mx.sum(attention_scores, axis=-2), axis=1)
-            else:
-                importance = mx.sum(attention_scores, axis=-2)  # [B, N]
 
-            # Low importance → better cache candidate
-            # Sort by importance, allow caching only for bottom-(1-importance_rank) tokens
-            rank = mx.argsort(importance, axis=-1)  # ascending: least important first
-            # Create priority mask: first cache_ratio*N tokens (least important) can be cached
-            n_cacheable = max(1, int(N * self.config.cache_ratio))
-            priority_threshold = rank[:, n_cacheable:n_cacheable + 1]  # [B, 1]
-            # Tokens whose rank position is below n_cacheable can be cached
-            # Build mask: for each token, check if its rank is in the cacheable set
-            token_ranks = mx.zeros_like(importance, dtype=mx.int32)
-            for b_idx in range(B):
-                token_ranks = token_ranks.at[b_idx, rank[b_idx]].add(
-                    mx.arange(N, dtype=mx.int32)
-                )
-            cacheable = token_ranks < n_cacheable
-            stable_mask = stable_mask & cacheable
-        else:
-            # Enforce cache_ratio without attention scores
-            n_stable = mx.sum(stable_mask.astype(mx.int32), axis=-1, keepdims=True)
-            max_cached = int(N * self.config.cache_ratio)
-            if max_cached < N:
-                # If too many stable, keep only the first max_cached by position
-                cumsum = mx.cumsum(stable_mask.astype(mx.int32), axis=-1)
-                stable_mask = stable_mask & (cumsum <= max_cached)
+def toca_select_tokens(
+    tokens: mx.array,
+    layer_idx: int,
+    step_idx: int,
+    config: ToCaConfig,
+    state: ToCaState,
+) -> tuple[mx.array, mx.array]:
+    """Partition tokens into (active, cached) sets for this layer+step.
 
-        return stable_mask
+    Args:
+        tokens: Current step's input tokens at this layer, ``[B, N, D]``.
+        layer_idx: Layer identifier (used as cache key).
+        step_idx: Current diffusion step index (informational).
+        config: ToCa configuration.
+        state: Mutable ToCa state holding per-layer history.
 
-    def apply_cache(
-        self,
-        computed_tokens: mx.array,
-        cache_mask: mx.array,
-    ) -> mx.array:
-        """Reconstruct full sequence from computed dynamic tokens and cached stable tokens.
+    Returns:
+        ``(active_indices, cached_indices)``:
+          * ``active_indices``: ``[B, N_active]`` — token positions the
+            caller must recompute this step.
+          * ``cached_indices``: ``[B, N_cached]`` — token positions the
+            caller should reuse from ``state.layer(layer_idx).cached_tokens``.
 
-        Args:
-            computed_tokens: Full-size tensor with recomputed values [B, N, D].
-                Dynamic positions have new values; stable positions can be anything.
-            cache_mask: Boolean [B, N]: True = use cached value, False = use computed.
+        Edge behavior — if ToCa is disabled, or the cache has no
+        content yet, or history is insufficient for the chosen
+        ``score_mode``, all N token positions are returned as active
+        and ``cached_indices`` is empty.
+    """
+    B, N, _ = tokens.shape
 
-        Returns:
-            Complete tokens [B, N, D] with cached stable + computed dynamic.
-        """
-        if self._state.cached_tokens is None:
-            return computed_tokens
+    if not config.enabled:
+        return _all_active(B, N)
 
-        mask_expanded = mx.expand_dims(cache_mask, axis=-1)  # [B, N, 1]
-        return mx.where(mask_expanded, self._state.cached_tokens, computed_tokens)
+    layer_state = state.layer(layer_idx)
 
-    def update_cache(
-        self, tokens: mx.array, mask: mx.array, step_idx: int
-    ) -> None:
-        """Update the token cache.
+    if layer_state.cached_tokens is None:
+        return _all_active(B, N)
 
-        Args:
-            tokens: Complete tokens [B, N, D] from this step.
-            mask: Cache mask used this step [B, N].
-            step_idx: Current step index.
-        """
-        self._state.cached_tokens = tokens
-        self._state.cached_mask = mask
-        # Track full recompute steps (when no tokens were cached)
-        if not mx.any(mask).item():
-            self._state.last_full_step = step_idx
+    scores = _token_scores(tokens, layer_state, config.score_mode)
+    if scores is None:
+        return _all_active(B, N)
 
-    def get_dynamic_indices(self, cache_mask: mx.array) -> mx.array:
-        """Return indices of tokens that need recomputation.
+    n_active = max(1, int(N * config.recompute_ratio))
+    if n_active >= N:
+        return _all_active(B, N)
 
-        Args:
-            cache_mask: Boolean [B, N]: True = cached, False = dynamic.
+    # Sort descending by score. argsort sorts ascending, so negate.
+    sorted_idx = mx.argsort(-scores, axis=-1)  # [B, N]
+    active = sorted_idx[:, :n_active]
+    cached = sorted_idx[:, n_active:]
+    # Sort each set by index to keep spatial order predictable for gather.
+    active = mx.sort(active, axis=-1)
+    cached = mx.sort(cached, axis=-1)
+    return active, cached
 
-        Returns:
-            Indices [B, N_dynamic] of dynamic tokens per batch.
-            Note: N_dynamic may vary per batch element. Returns padded
-            to max N_dynamic with -1 for padding.
-        """
-        B, N = cache_mask.shape
-        # Invert mask: dynamic tokens
-        dynamic = ~cache_mask  # [B, N]
-        # Use argsort trick: sort so True (dynamic) comes first
-        # Then take the first N_dynamic indices
-        indices = mx.argsort(~dynamic, axis=-1)  # dynamic indices first
-        n_dynamic = mx.sum(dynamic.astype(mx.int32), axis=-1)  # [B]
-        max_dynamic = int(mx.max(n_dynamic).item())
-        return indices[:, :max_dynamic]
 
-    def reset(self) -> None:
-        """Clear all cached state."""
-        self._state = ToCaState()
+def _all_active(B: int, N: int) -> tuple[mx.array, mx.array]:
+    """Return ``(all_indices, empty_indices)`` for the fallback path."""
+    arange = mx.arange(N, dtype=mx.int32)
+    active = mx.broadcast_to(arange.reshape(1, N), (B, N))
+    cached = mx.zeros((B, 0), dtype=mx.int32)
+    return active, cached
+
+
+def toca_compose(
+    active_features: mx.array,
+    cached_features: mx.array,
+    active_indices: mx.array,
+    cached_indices: mx.array,
+    total_n: int,
+) -> mx.array:
+    """Reassemble a full ``[B, N, D]`` tensor from active+cached pieces.
+
+    Args:
+        active_features: ``[B, N_active, D]`` — freshly computed features
+            for the positions in ``active_indices``.
+        cached_features: ``[B, N_cached, D]`` — cached features for the
+            positions in ``cached_indices``. May be ``[B, 0, D]`` if all
+            tokens were recomputed.
+        active_indices: ``[B, N_active]`` original positions (0..N-1) of
+            the active tokens.
+        cached_indices: ``[B, N_cached]`` original positions of the
+            cached tokens.
+        total_n: The total token count ``N``.
+
+    Returns:
+        ``[B, N, D]`` tensor with each token placed at its original index.
+    """
+    B, _, D = active_features.shape
+    output = mx.zeros((B, total_n, D), dtype=active_features.dtype)
+    # Scatter-add is safe here because active and cached index sets are disjoint.
+    for b in range(B):
+        output = output.at[b, active_indices[b]].add(active_features[b])
+        if cached_indices.shape[1] > 0:
+            output = output.at[b, cached_indices[b]].add(cached_features[b])
+    return output
+
+
+def toca_update(
+    layer_idx: int,
+    tokens: mx.array,
+    state: ToCaState,
+) -> None:
+    """Record the full post-block token tensor for a layer after a step.
+
+    Call after the caller has assembled the complete ``[B, N, D]`` output
+    of a block (via :func:`toca_compose`). Shifts ``prev ← cached``,
+    then ``cached ← tokens``, and increments the step count.
+    """
+    layer_state = state.layer(layer_idx)
+    layer_state.prev_tokens = layer_state.cached_tokens
+    layer_state.cached_tokens = tokens
+    layer_state.step_count += 1
+
+
+def toca_get_cached(
+    layer_idx: int,
+    state: ToCaState,
+) -> Optional[mx.array]:
+    """Return the last full token tensor recorded for ``layer_idx``, or None."""
+    layer_state = state.layers.get(layer_idx)
+    return layer_state.cached_tokens if layer_state is not None else None
+
+
+def toca_reset(state: ToCaState) -> None:
+    """Clear all per-layer history for a new inference run."""
+    state.layers.clear()

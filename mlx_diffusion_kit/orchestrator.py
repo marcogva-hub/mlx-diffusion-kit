@@ -74,7 +74,15 @@ from mlx_diffusion_kit.gating.tgate import (
 )
 from mlx_diffusion_kit.quality.freeu import FreeUConfig
 from mlx_diffusion_kit.tokens.ddit_scheduling import DDiTScheduleConfig, DDiTScheduler
-from mlx_diffusion_kit.tokens.toca import ToCaConfig, TokenCacheManager
+from mlx_diffusion_kit.tokens.toca import (
+    ToCaConfig,
+    ToCaState,
+    create_toca_state,
+    toca_compose,
+    toca_reset,
+    toca_select_tokens,
+    toca_update,
+)
 from mlx_diffusion_kit.tokens.tome import (
     MergeInfo,
     ToMeConfig,
@@ -177,9 +185,9 @@ class DiffusionOptimizer:
                 self.config.total_steps, self.config.ddit_schedule
             )
 
-        self._toca: Optional[TokenCacheManager] = None
+        self._toca_state: Optional[ToCaState] = None
         if self.config.toca and not self.config.is_single_step:
-            self._toca = TokenCacheManager(self.config.toca)
+            self._toca_state = create_toca_state()
 
         self._ditfastattn: Optional[DiTFastAttnManager] = None
         if self.config.ditfastattn and not self.config.is_single_step:
@@ -522,8 +530,42 @@ class DiffusionOptimizer:
         return self._ddit_scheduler.get_patch_stride(step_idx)
 
     @property
-    def toca_manager(self) -> Optional[TokenCacheManager]:
-        return self._toca
+    def toca_state(self) -> Optional[ToCaState]:
+        return self._toca_state
+
+    # --- B7 ToCa (per-layer token-level caching across steps) ---
+
+    def toca_select(
+        self, tokens: mx.array, layer_idx: int, step_idx: int
+    ) -> Optional[tuple[mx.array, mx.array]]:
+        """Partition tokens into (active, cached) indices for this layer.
+
+        Returns None if ToCa is not configured. Otherwise returns the
+        (active_indices, cached_indices) tuple from :func:`toca_select_tokens`.
+        """
+        if self._toca_state is None or self.config.toca is None:
+            return None
+        return toca_select_tokens(
+            tokens, layer_idx, step_idx, self.config.toca, self._toca_state
+        )
+
+    def toca_record(self, layer_idx: int, tokens: mx.array) -> None:
+        """Record post-block tokens for a layer after the caller assembled them."""
+        if self._toca_state is not None:
+            toca_update(layer_idx, tokens, self._toca_state)
+
+    def toca_compose_tokens(
+        self,
+        active_features: mx.array,
+        cached_features: mx.array,
+        active_indices: mx.array,
+        cached_indices: mx.array,
+        total_n: int,
+    ) -> mx.array:
+        """Reassemble the full token tensor. Convenience passthrough."""
+        return toca_compose(
+            active_features, cached_features, active_indices, cached_indices, total_n
+        )
 
     @property
     def ditfastattn_manager(self) -> Optional[DiTFastAttnManager]:
@@ -588,8 +630,8 @@ class DiffusionOptimizer:
             self._smooth_cache_state = create_smooth_cache_state()
         if self._encoder_sharing_state is not None:
             self._encoder_sharing_state = create_encoder_sharing_state()
-        if self._toca is not None:
-            self._toca.reset()
+        if self._toca_state is not None:
+            toca_reset(self._toca_state)
         if self._ditfastattn is not None:
             self._ditfastattn.reset()
         if self._deep_cache_state is not None:

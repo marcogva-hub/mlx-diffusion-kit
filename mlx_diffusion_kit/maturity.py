@@ -28,7 +28,7 @@ COMPONENT_MATURITY: dict[str, Maturity] = {
     "B4_SmoothCache": Maturity.STABLE,
     "B5_DeepCache": Maturity.BETA,  # P7.1 rebuild: UNet deep-branch caching per paper
     "B6_MultiGranular": Maturity.BETA,
-    "B7_ToCa": Maturity.STUB,  # P7.3 rebuild pending — prior impl was single-step cosine, not velocity-based
+    "B7_ToCa": Maturity.BETA,  # P7.3 rebuild: per-layer velocity-based token caching
     "B8_ToMe": Maturity.STABLE,
     "B8_ToPi": Maturity.BETA,
     "B9_DiffSparse": Maturity.STUB,
