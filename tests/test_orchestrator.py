@@ -241,3 +241,58 @@ def test_reset():
     assert opt.teacache_state.prev_modulated_input is None
     assert opt.tgate_state is not None
     assert len(opt.tgate_state.cached_cross_attn) == 0
+
+
+def test_spectral_cache_state_not_corrupted_by_update_step_cache():
+    """Regression test for P8 Fix 1: update_step_cache must NOT force-refresh
+    SpectralCache state.
+
+    The caller's SpectralCache operates on an arbitrary intermediate feature
+    stream chosen by the caller. The orchestrator's modulated_input is a
+    different tensor (shape and semantics). If update_step_cache were to
+    write modulated_input into the SpectralCache state, the next
+    apply_spectral_cache call with real features would either crash on
+    shape mismatch or silently produce corrupted output.
+
+    This test uses deliberately different shapes for modulated_input and
+    the features passed to apply_spectral_cache to make any coupling
+    between them visible.
+    """
+    from mlx_diffusion_kit.cache.spectral_cache import SpectralCacheConfig
+
+    cfg = OrchestratorConfig(
+        spectral_cache=SpectralCacheConfig(
+            low_freq_ratio=0.25,
+            cache_interval_low=4,
+            cache_interval_high=1,
+        ),
+        is_single_step=False,
+    )
+    opt = DiffusionOptimizer(cfg)
+
+    # Use one shape for the caller's features, and a DIFFERENT shape for
+    # the model's modulated_input. If update_step_cache touched SpectralCache,
+    # it would store state with the modulated_input shape and the next
+    # apply_spectral_cache call would fail or corrupt.
+    features_shape = (1, 8, 64)
+    modulated_shape = (1, 16, 32)
+
+    features_0 = mx.random.normal(features_shape)
+    modulated_0 = mx.random.normal(modulated_shape)
+    output_0 = mx.random.normal(modulated_shape)
+
+    # Step 0: caller applies spectral cache on features, then
+    # update_step_cache is called on model input/output.
+    y0 = opt.apply_spectral_cache(features_0, step_idx=0)
+    assert y0.shape == features_shape
+    opt.update_step_cache(modulated_0, output_0, step_idx=0)
+
+    # Step 1: caller applies spectral cache again with the SAME shape as
+    # before. If SpectralCache state had been force-refreshed with
+    # modulated_input at step 0, this call would either crash on shape
+    # mismatch (concatenation across bands of incompatible shapes) or
+    # reconstruct from nonsense bands. Must succeed and match shape.
+    features_1 = mx.random.normal(features_shape)
+    y1 = opt.apply_spectral_cache(features_1, step_idx=1)
+    assert y1.shape == features_shape
+    assert mx.all(mx.isfinite(y1)).item()

@@ -59,7 +59,6 @@ from mlx_diffusion_kit.cache.spectral_cache import (
     create_spectral_cache_state,
     spectral_cache_apply,
     spectral_cache_reset,
-    spectral_cache_update,
 )
 from mlx_diffusion_kit.cache.smooth_cache import (
     SmoothCacheConfig,
@@ -387,11 +386,12 @@ class DiffusionOptimizer:
         """
         if self._teacache_state is not None:
             teacache_update(modulated_input, output, self._teacache_state)
-        if self._spectral_cache_state is not None and self.config.spectral_cache is not None:
-            # Force-refresh both bands from the input the caller just used.
-            spectral_cache_update(
-                modulated_input, step_idx, self.config.spectral_cache, self._spectral_cache_state
-            )
+        # Note: SpectralCache is NOT updated here. Its state is a sequence of
+        # frequency-domain snapshots of an arbitrary intermediate feature
+        # stream chosen by the caller, not of `modulated_input`. SpectralCache
+        # manages its own state via :meth:`apply_spectral_cache`; force-
+        # refreshing it from a step-level hook with a different tensor would
+        # corrupt the cache (shape and semantics would both drift).
         if self._smooth_cache_state is not None:
             smooth_cache_record(step_idx, output, self._smooth_cache_state)
 
