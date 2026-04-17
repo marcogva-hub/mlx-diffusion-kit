@@ -1,6 +1,6 @@
 # mlx-diffusion-kit API Manual
 
-Version: **0.1.0** — 46 public exports.
+Version: **0.1.0** — 89 public exports.
 
 All exports are available from the top-level package:
 ```python
@@ -243,3 +243,113 @@ All fields are `Optional` with `None` default (disabled when absent):
 **`get_maturity(component_id) -> Maturity`** — Query component maturity.
 
 **`list_components(maturity=None) -> dict`** — List components by maturity level.
+
+---
+
+## Rebuilt / Added in P7 (2026-04-07)
+
+These components were audited against their reference papers, found to be
+shallow or semantically incorrect in the initial release, and rebuilt.
+
+### FBCache (B2)
+
+**`FBCacheConfig`** — Configuration for First-Block Cache.
+- `rel_l1_thresh: float = 0.1` — relative L1 threshold on first-block output.
+- `start_step: int = 0` / `end_step: int | None` — caching window.
+- `max_consecutive_cached: int = 5` — safety ceiling.
+- `enabled: bool = True`
+
+**`fbcache_should_compute_remaining(fb_output, step_idx, config, state) -> bool`**
+True if the caller must run blocks 2..N; False to reuse via reconstruct.
+
+**`fbcache_update(fb_output, residual, state) -> None`**
+Record `(fb, residual = full_output - fb_output)` after a compute step.
+
+**`fbcache_reconstruct(fb_output, state) -> mx.array`**
+Return `fb_output + cached_residual`. Raises if no cache populated.
+
+**`fbcache_reset(state) -> None`** — Clear state.
+
+### SpectralCache (B3)
+
+**`SpectralCacheConfig`** — Frequency-domain feature caching.
+- `low_freq_ratio: float = 0.25`
+- `cache_interval_low: int = 4` / `cache_interval_high: int = 1`
+- `transform: "rfft" | "dct"` — DCT raises NotImplementedError.
+- `spectral_velocity_aware: bool = False` — SeaCache variant.
+- `velocity_override_thresh: float = 0.5`
+- `enabled: bool = True`
+
+**`spectral_cache_apply(features, step_idx, config, state) -> mx.array`**
+Round-trip via rFFT: split LF/HF, apply per-band caching policy, combine,
+inverse transform. Identity (up to f32 precision) when both intervals = 1.
+
+**`spectral_cache_update(features, step_idx, config, state) -> None`**
+Force-refresh both bands from features.
+
+**`spectral_cache_reset(state) -> None`**
+
+### DeepCache (B5)
+
+**`DeepCacheConfig`** — UNet deep-branch caching.
+- `cache_interval: int = 3` / `start_step: int = 0` / `enabled: bool = True`
+
+**`deepcache_should_recompute(step_idx, config, state) -> bool`**
+Delta-based (not modulo), so TeaCache-skipped step sequences stay correct.
+
+**`deepcache_store(features, step_idx, state)`** / **`deepcache_get(state)`** / **`deepcache_reset(state)`**.
+
+### MosaicDiff layer redundancy (moved out of DeepCache)
+
+**`analyze_layer_redundancy(layer_weights: dict, method="cosine"|"l2") -> dict[int, float]`**
+**`select_cacheable_layers(scores, ratio=0.5) -> list[int]`**
+
+### ToCa (B7)
+
+**`ToCaConfig`** — Per-layer velocity-based token caching.
+- `recompute_ratio: float = 0.5`
+- `score_mode: "velocity" | "magnitude"`
+- `enabled: bool = True`
+
+**`toca_select_tokens(tokens, layer_idx, step_idx, config, state) -> (active, cached)`**
+Returns two sorted-by-position index arrays partitioning `[0, N)`.
+Fallback to all-active when history is insufficient.
+
+**`toca_compose(active_feats, cached_feats, active_idx, cached_idx, total_n) -> mx.array`**
+Reassemble full `[B, N, D]` tensor from disjoint pieces.
+
+**`toca_update(layer_idx, tokens, state)`** — shifts `prev ← cached`, `cached ← tokens`.
+
+**`toca_get_cached(layer_idx, state)`** / **`toca_reset(state)`**.
+
+### DiTFastAttn (B12)
+
+**`AttnStrategy`** — Enum: `FULL`, `WINDOW`, `SHARE`, `RESIDUAL`.
+
+**`DiTFastAttnConfig`** — Per-layer policy.
+- `window_start_step: int = 10`
+- `window_size: int = 64`
+- `sharing_layers: list[int]` — layers eligible for SHARE.
+- `residual_cache_layers: list[int]` — layers eligible for RESIDUAL.
+
+**`ditfastattn_decide(layer_idx, step_idx, config, state) -> AttnStrategy`**
+Precedence: step 0 → FULL; RESIDUAL > SHARE > WINDOW > FULL, with
+safety fallback when a required cache is missing.
+
+**`ditfastattn_record_attn_map`** / **`ditfastattn_get_cached_attn`**
+**`ditfastattn_record_residual`** / **`ditfastattn_get_cached_residual`**
+**`ditfastattn_reset`**
+
+### Separable Conv3D (B18)
+
+**`SeparableConv3D(in_channels, out_channels, kernel_size=(kT,kH,kW), mid_channels=None, ...)`**
+R(2+1)D `nn.Module`: spatial `Conv2d((kH,kW))` then temporal `Conv1d(kT)`.
+Input `(N, T, H, W, in)` → output `(N, T', H', W', out)`.
+
+**`decompose_conv3d_to_separable(conv3d_weight, rank=None) -> (spatial, temporal, error)`**
+SVD-based factorization of a pretrained `Conv3d.weight[out, kT, kH, kW, in]`.
+At full rank, reconstruction error < 1e-4 (float32). At reduced rank, the
+decomposition is lossy and the returned error lets the caller judge.
+
+**`build_separable_from_decomposition(spatial, temporal, in_ch, out_ch, kernel_size, ...) -> SeparableConv3D`**
+Convenience bridge from Mode B output to a Mode A module.

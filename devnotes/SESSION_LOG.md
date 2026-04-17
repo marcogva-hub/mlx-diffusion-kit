@@ -634,3 +634,28 @@
 - Overall: [HIGH]
 - Risks: MLX `mx.linalg.svd` requires `stream=mx.cpu` at this MLX version. Documented and verified. If a future MLX ships GPU SVD, the decomposition should automatically get faster; the API is stable either way.
 - Risks: Mode B at reduced rank is lossy by definition. The returned `reconstruction_error` lets the user decide; no silent accuracy degradation.
+
+---
+## [2026-04-07 11:30] Phase P7 wrap-up — docs, exports, final verification
+
+### Changes made
+- `mlx_diffusion_kit/__init__.py` — re-exported the rebuilt APIs. Export count grew from 46 to 89. All 89 pass `hasattr(mod, name)` smoke check. [HIGH]
+- `README.md` — table updated: B5 maturity note (UNet-generalized scope, 5 models not 3), B7 target narrowed to multi-step DiT, B12 moved to Beta, B18 added row. Status line: 21→23 components, 245+→276+ tests, maturity counts corrected. [HIGH]
+- `CLAUDE.md:L174-176` — implementation-status block updated (89 exports, 23 components, 276+ tests across 27 test files). [HIGH]
+- `CHANGELOG.md` — new "Unreleased — P7 rebuild branch" section documenting the audit + rebuild of B2/B3/B5/B7/B12 and the new B18, with rationale for each. Also covers the orchestrator API reshuffles (cascade layout change, method renames). [HIGH]
+- `docs/API_MANUAL.md` — appended "Rebuilt / Added in P7 (2026-04-07)" section with full per-component signatures. Version banner bumped from 46 to 89 exports. [HIGH]
+
+### Dependency & regression check
+- Import smoke: 89/89 exports importable via `mlx_diffusion_kit.<name>`.
+- Full test suite: **276 pass, 0 failures**. Up from 245 baseline on `main` (net +31 across the 6 rebuilt/new components; deltas recorded per-phase in the P7.1–P7.6 entries).
+- Orchestrator API changes not visible at top-level — all were internal method renames (e.g., `should_compute_layer_deep` → `should_recompute_deep`). External users consuming only the documented public surface are unaffected where the algorithms were paper-faithful; where they depended on the previous incorrect semantics (notably FBCache caching full output), they break by design.
+
+### Final component maturity snapshot
+- STABLE: 9 (B1, B4, B8 ToMe, B11, B13, B14.1, B15, B17, B23)
+- BETA: 11 (B2, B3, B5, B6, B7, B8 ToPi, B10, B12, B14.2, B18, B22)
+- EXPERIMENTAL: 1 (WorldCache motion)
+- STUB: 2 (B9 DiffSparse, B19 Flash-VAED/Neodragon — separate project)
+
+### Confidence
+- Overall: [HIGH]
+- Next: ready for user review on the branch. Per the prompt, no push until review. Once reviewed, merge `feat/readme-backlog-p7` into `main` and tag as needed (not `v0.1.0` since that tag is already on the original release — next tag should be `v0.2.0` or a pre-release like `v0.2.0-rc.1` because the external API changed in non-trivial ways).

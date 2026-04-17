@@ -4,7 +4,7 @@ Inference optimizations for diffusion and video super-resolution models on
 MLX / Apple Silicon. Training-free techniques that reduce compute by 2-5x
 without quality loss.
 
-Current version: **0.1.0** — 21 optimization components, 245+ tests.
+Current version: **0.1.0** — 22 optimization components, 276+ tests.
 
 ## Foreword
 
@@ -47,10 +47,10 @@ Requirements: Python >= 3.10, MLX >= 0.25.0, Apple Silicon Mac.
 ## Current Status
 
 - **9 STABLE** components — tested, integrated, production-ready API.
-- **9 BETA** components — functional and tested, API may evolve.
-- **2 EXPERIMENTAL** — functional, use with caution.
-- **3 STUB** — interface defined, implementation pending.
-- **245+ tests** pass, 0 failures.
+- **11 BETA** components — functional and tested, API may evolve.
+- **1 EXPERIMENTAL** — functional, use with caution.
+- **2 STUB** — interface defined, implementation pending.
+- **276+ tests** pass, 0 failures.
 - Primary validation hardware: Apple M1 Max.
 
 ## Component Overview
@@ -61,18 +61,19 @@ Requirements: Python >= 3.10, MLX >= 0.25.0, Apple Silicon Mac.
 | B2 | First-Block Cache | Step Cache | Beta | 6 multi-step |
 | B3 | SpectralCache | Step Cache | Beta | 6 multi-step |
 | B4 | SmoothCache + Taylor | Step Cache | Stable | 6 multi-step |
-| B5 | DeepCache + MosaicDiff | Step Cache | Beta | 3 UNet multi-step |
+| B5 | DeepCache (+ MosaicDiff layer-redundancy tool) | Step Cache | Beta | 5 UNet multi-step |
 | B6 | Multi-Granular Cache | Step Cache | Beta | 6 multi-step |
-| B7 | ToCa (Token Cache) | Tokens | Beta | 6 multi-step |
+| B7 | ToCa (Token Cache) | Tokens | Beta | multi-step DiT |
 | B8 | ToMe + ToPi | Tokens | Stable / Beta | ALL 11 |
 | B9 | DiffSparse | Tokens | Stub | DiT models |
 | B10 | DDiT Scheduling | Tokens | Beta | multi-step DiT |
 | B11 | T-GATE | Gating | Stable | 6 multi-step |
-| B12 | DiTFastAttn | Attention | Experimental | multi-step DiT |
+| B12 | DiTFastAttn (4 strategies) | Attention | Beta | multi-step DiT |
 | B13 | FreeU | Quality | Stable | 5 UNet |
 | B14 | DPM-Solver-v3 / Adaptive | Scheduler | Stable / Beta | 6 multi-step |
 | B15 | Text Embedding Cache | Encoder | Stable | ALL 11 |
 | B17 | WF-VAE Causal Cache | VAE | Stable | SeedVR2 + CogVideoX |
+| B18 | Separable Conv3D + SVD utility | VAE | Beta | SeedVR2 VAE |
 | B22 | Encoder Sharing | Cache | Beta | multi-step DiT |
 | B23 | Orchestrator + PISA | Orchestrator | Stable | ALL 11 |
 
