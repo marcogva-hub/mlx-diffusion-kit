@@ -40,7 +40,7 @@ COMPONENT_MATURITY: dict[str, Maturity] = {
     "B14_AdaptiveStep": Maturity.BETA,
     "B15_EmbedCache": Maturity.STABLE,
     "B17_WaveletVAE": Maturity.STABLE,
-    "B18_SeparableConv3D": Maturity.STUB,
+    "B18_SeparableConv3D": Maturity.BETA,  # P7.6: Mode A module + Mode B SVD decomposition
     "B19_DecoderDistill": Maturity.STUB,
     "B22_EncoderSharing": Maturity.BETA,
     "B23_Orchestrator": Maturity.STABLE,

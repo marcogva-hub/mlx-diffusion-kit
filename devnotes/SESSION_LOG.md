@@ -606,3 +606,31 @@
 ### Confidence
 - Overall: [HIGH]
 - Risks: the safety fallback (missing-cache → drop to next strategy) means users who configure `sharing_layers=[0]` but forget to call `record_attn_map` will silently get WINDOW/FULL instead of SHARE. Documented in the docstring. An alternative would be to raise, but that's noisier and less forgiving.
+
+---
+## [2026-04-07 11:00] Phase P7.6: B18 Separable Conv3D (new)
+
+### Plan
+- **Objective:** Implement R(2+1)D separable 3D convolution in both modes: new-module (Mode A) and SVD decomposition of a pretrained dense Conv3d kernel (Mode B).
+- **Files to modify:** `vae/separable_conv3d.py` (new), `vae/__init__.py`; `tests/test_separable_conv3d.py` (new).
+
+### Changes made
+- `vae/separable_conv3d.py` — new file. [HIGH]
+  - Mode A: `SeparableConv3D(nn.Module)`. Uses `nn.Conv2d` for spatial (kH, kW) followed by `nn.Conv1d` for temporal (kT). Forward reshapes via transpose to (N*T, H, W, C) for spatial, then (N*H'*W', T, mid) for temporal. Configurable `mid_channels` (rank).
+  - Mode B: `decompose_conv3d_to_separable(W, rank=None) -> (spatial, temporal, error)`. Reshapes `W[out, kT, kH, kW, in]` to `(kT*out, kH*kW*in)` via transpose, runs SVD on CPU stream (MLX SVD is CPU-only at current MLX version on M1 Max), distributes sqrt(Σ) evenly between U and V^T, reshapes factors to `(mid, kH, kW, in)` and `(out, kT, mid)`. Returns the relative Frobenius reconstruction error for the caller to judge acceptability.
+  - Bridge helper: `build_separable_from_decomposition` wraps Mode B factors into a Mode A module.
+- `vae/__init__.py` — export all three symbols. [HIGH]
+- `tests/test_separable_conv3d.py` — 10 tests. Mode A: forward shape (5 → 3 temporal kernel reduces T by 2), forward finiteness, parameter-count formula validation, input-validation errors. Mode B: **full-rank lossless reconstruction** (error < 1e-4), reduced-rank error is positive and bounded, **monotone error decrease with increasing rank**, bridge produces a working module. [HIGH]
+
+### Dependency & regression check
+- No orchestrator integration per prompt spec (B18 is a VAE building block, not a step-level decision).
+- Full test suite: 276 pass (previously 266 — net +10, matches the 10 new tests). No regressions.
+
+### Tech cost assessment
+- Mode A: parameter count follows `kH·kW·in·mid + kT·mid·out + out_bias`. For a 3³ kernel, `in=out=mid=64`, separable = 28_864 vs dense = 110_592, a 3.8× reduction.
+- Mode B: SVD on `(kT·out, kH·kW·in)` matrix. For `out=64, kT=3, kH=kW=3, in=64` → SVD on `(192, 576)`, CPU-bound. One-time cost at model conversion.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: MLX `mx.linalg.svd` requires `stream=mx.cpu` at this MLX version. Documented and verified. If a future MLX ships GPU SVD, the decomposition should automatically get faster; the API is stable either way.
+- Risks: Mode B at reduced rank is lossy by definition. The returned `reconstruction_error` lets the user decide; no silent accuracy degradation.
