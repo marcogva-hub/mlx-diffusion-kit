@@ -50,7 +50,8 @@ from mlx_diffusion_kit.cache.spectral_cache import (
     SpectralCacheConfig,
     SpectralCacheState,
     create_spectral_cache_state,
-    spectral_cache_should_compute,
+    spectral_cache_apply,
+    spectral_cache_reset,
     spectral_cache_update,
 )
 from mlx_diffusion_kit.cache.smooth_cache import (
@@ -267,25 +268,24 @@ class DiffusionOptimizer:
         self,
         step_idx: int,
         modulated_input: mx.array,
-        sigma_t: float = 0.5,
         frame: Optional[mx.array] = None,
     ) -> bool:
         """Check if the full model forward should run for this step.
 
-        Step-level cascade (first configured wins):
-          1. TeaCache — best quality, requires calibrated coefficients
-          2. SpectralCache — frequency-domain skip decision (requires sigma_t)
+        Only TeaCache (with optional WorldCache motion adjustment) gates
+        step-level compute. FBCache and SpectralCache operate at finer
+        granularities:
 
-        FBCache is NOT in this cascade: it decides at the transformer-block
-        boundary (skip blocks 2..N), not the whole-step boundary. Use
-        :meth:`should_compute_remaining_blocks` instead.
+          * FBCache (B2) decides at the transformer-block boundary —
+            see :meth:`should_compute_remaining_blocks`.
+          * SpectralCache (B3) transforms-in / transforms-out of the
+            frequency domain — see :meth:`apply_spectral_cache`.
 
         Single-step models always return True.
 
         Args:
             step_idx: Current diffusion step.
             modulated_input: Timestep-modulated input tensor.
-            sigma_t: Current noise level 0→1 (for SpectralCache).
             frame: Current video frame (for WorldCache motion adjustment).
 
         Returns:
@@ -294,7 +294,6 @@ class DiffusionOptimizer:
         if self.config.is_single_step:
             return True
 
-        # Priority 1: TeaCache (with optional motion adjustment)
         if self._teacache_state is not None and self.config.teacache is not None:
             cfg = self.config.teacache
             if self._motion_tracker is not None and frame is not None:
@@ -311,13 +310,24 @@ class DiffusionOptimizer:
                 modulated_input, step_idx, cfg, self._teacache_state
             )
 
-        # Priority 2: SpectralCache
-        if self._spectral_cache_state is not None and self.config.spectral_cache is not None:
-            return spectral_cache_should_compute(
-                modulated_input, sigma_t, self.config.spectral_cache, self._spectral_cache_state
-            )
-
         return True
+
+    # --- B3 SpectralCache (frequency-domain reconstruction, not a skip gate) ---
+
+    def apply_spectral_cache(
+        self, features: mx.array, step_idx: int
+    ) -> mx.array:
+        """Reconstruct features through the frequency-domain cache.
+
+        Pass-through if SpectralCache is not configured. Otherwise runs
+        :func:`spectral_cache_apply` which forwards to the rFFT, applies
+        the LF/HF caching policy, and inverse-transforms.
+        """
+        if self._spectral_cache_state is None or self.config.spectral_cache is None:
+            return features
+        return spectral_cache_apply(
+            features, step_idx, self.config.spectral_cache, self._spectral_cache_state
+        )
 
     # --- B2 FBCache (block-level, not step-level) ---
 
@@ -374,8 +384,11 @@ class DiffusionOptimizer:
         """
         if self._teacache_state is not None:
             teacache_update(modulated_input, output, self._teacache_state)
-        if self._spectral_cache_state is not None:
-            spectral_cache_update(modulated_input, output, self._spectral_cache_state)
+        if self._spectral_cache_state is not None and self.config.spectral_cache is not None:
+            # Force-refresh both bands from the input the caller just used.
+            spectral_cache_update(
+                modulated_input, step_idx, self.config.spectral_cache, self._spectral_cache_state
+            )
         if self._smooth_cache_state is not None:
             smooth_cache_record(step_idx, output, self._smooth_cache_state)
 
@@ -383,13 +396,12 @@ class DiffusionOptimizer:
         """Retrieve output for a skipped step (step-level caches only).
 
         If SmoothCache is configured, returns interpolated features.
-        Otherwise, returns the raw TeaCache cached residual, then
-        SpectralCache's cached output as a fallback.
+        Otherwise, returns the raw TeaCache cached residual.
 
-        Note: this method does NOT return FBCache's cached data.
-        FBCache stores a residual (not a full output), and reconstruction
-        requires the current first-block output — call
-        :meth:`fbcache_reconstruct_output(fb_output)` at the block level.
+        Note: this method does NOT return FBCache or SpectralCache data.
+        FBCache stores a residual — use :meth:`fbcache_reconstruct_output`.
+        SpectralCache reconstructs via inverse transform — use
+        :meth:`apply_spectral_cache`.
 
         Args:
             step_idx: The step being skipped (for SmoothCache interpolation).
@@ -404,8 +416,6 @@ class DiffusionOptimizer:
             )
         if self._teacache_state is not None:
             return self._teacache_state.cached_residual
-        if self._spectral_cache_state is not None:
-            return self._spectral_cache_state.cached_output
         return None
 
     def merge_tokens(self, tokens: mx.array) -> mx.array:
@@ -623,7 +633,7 @@ class DiffusionOptimizer:
         if self._fbcache_state is not None:
             self._fbcache_state = create_fbcache_state()
         if self._spectral_cache_state is not None:
-            self._spectral_cache_state = create_spectral_cache_state()
+            spectral_cache_reset(self._spectral_cache_state)
         if self._tgate_state is not None:
             self._tgate_state = create_tgate_state()
         if self._smooth_cache_state is not None:

@@ -52,7 +52,8 @@ from mlx_diffusion_kit.cache.spectral_cache import (
     SpectralCacheConfig,
     SpectralCacheState,
     create_spectral_cache_state,
-    spectral_cache_should_compute,
+    spectral_cache_apply,
+    spectral_cache_reset,
     spectral_cache_update,
 )
 from mlx_diffusion_kit.cache.smooth_cache import (
@@ -96,7 +97,8 @@ __all__ = [
     "SpectralCacheConfig",
     "SpectralCacheState",
     "create_spectral_cache_state",
-    "spectral_cache_should_compute",
+    "spectral_cache_apply",
+    "spectral_cache_reset",
     "spectral_cache_update",
     # B1 TeaCache
     "TeaCacheConfig",

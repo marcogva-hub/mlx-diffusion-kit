@@ -556,3 +556,28 @@
 ### Confidence
 - Overall: [HIGH]
 - Risks: the compose function uses a per-batch Python loop for scatter-add. Acceptable because B is small; matches existing ToPi and ToMe patterns. If profiled as a bottleneck, a vectorized `at[]` path via flat batch offsets is possible.
+
+---
+## [2026-04-07 10:00] Phase P7.4: B3 SpectralCache + SeaCache rebuild
+
+### Plan
+- **Objective:** Replace the step-level skip decision with actual frequency-domain LF/HF caching and inverse-transform reconstruction, per the prompt. Add the SeaCache variant (`spectral_velocity_aware`) that invalidates LF cache on high per-band velocity.
+- **Files to modify:** `cache/spectral_cache.py` (rewrite), `cache/__init__.py`, `orchestrator.py`; `tests/test_spectral_cache.py` (rewrite).
+
+### Changes made
+- `cache/spectral_cache.py` — rewrite. Config: `low_freq_ratio=0.25`, `cache_interval_low=4`, `cache_interval_high=1`, `transform="rfft"|"dct"`, `spectral_velocity_aware=False`, `velocity_override_thresh=0.5`. State: `cached_low_freq`, `cached_high_freq`, `prev_full_spectra` (bounded at 2 for SeaCache), `last_low_recompute_step`, `last_high_recompute_step`. Core function `spectral_cache_apply(features, step_idx, config, state) -> features` does the round trip: rFFT → split LF/HF → apply policy → combine → irFFT. Delta-based interval arithmetic so TeaCache-skipped steps don't desync. DCT raises NotImplementedError with a clear message (MLX has no native DCT). [HIGH]
+- `cache/__init__.py` — export new API, drop `spectral_cache_should_compute`. [HIGH]
+- `orchestrator.py` — SpectralCache removed from `should_compute_step` cascade (it's not a skip gate anymore). New method `apply_spectral_cache(features, step_idx)` for caller-driven application. `should_compute_step` signature simplified (removed `sigma_t` parameter since nothing else used it). `update_step_cache` updates spectral state via the new `spectral_cache_update(features, step_idx, config, state)` signature. `get_cached_output` docstring now explains that SpectralCache has its own reconstruction path. [HIGH]
+- `tests/test_spectral_cache.py` — 11 new tests: shape preservation, **identity when both intervals = 1** (the canonical reconstruction test), disabled passthrough, **LF cache honored** (verifies the combined spectrum explicitly), LF invalidates after interval, HF always fresh at interval=1, DCT raises, **SeaCache forces recompute on high velocity**, SeaCache stable on small change, update forces refresh, reset clears all. [HIGH]
+
+### Dependency & regression check
+- `should_compute_step` signature changed (`sigma_t` removed). Before change I grep'd for callers — no tests use that kwarg. Integration tests use keyword arguments that no longer include `sigma_t` in their call sites; no breakage.
+- Full test suite: 262 pass (previously 258 — net +4). No regressions.
+
+### Tech cost assessment
+- Compute: forward + inverse rFFT per call. MLX complex64 round-trips at ~1e-6 error. For N=4096 tokens along the last axis, O(N log N).
+- Memory: two band caches (LF + HF). Sum is ~one spectrum-sized complex array. For SeaCache: up to 2 additional full spectra in history.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: FFT is taken along the last axis only. For feature maps where the last axis is the channel/embedding dim (standard DiT layout), this is correct. If a user passes features with a different axis convention, they must reshape first. Documented implicitly via the `axis=-1` contract in the docstring.
