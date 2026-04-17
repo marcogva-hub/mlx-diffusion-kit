@@ -176,3 +176,38 @@ def test_reset_clears_state():
     assert state.cached_residual is None
     assert state.step_counter == 0
     assert state.consecutive_cached == 0
+
+
+def test_fbcache_reconstruct_raises_on_shape_mismatch():
+    """fbcache_reconstruct must raise a clear ValueError when fb_output
+    shape differs from cached residual shape (e.g., resolution change
+    between steps without cache reset). A cryptic MLX shape error would
+    be a much worse caller experience than a descriptive ValueError."""
+    state = create_fbcache_state()
+
+    # Populate cache at resolution A.
+    fb_a = mx.random.normal((1, 64, 128))
+    residual_a = mx.random.normal((1, 64, 128))
+    fbcache_update(fb_a, residual_a, state)
+
+    # Attempt to reconstruct at resolution B without reset.
+    fb_b = mx.random.normal((1, 32, 128))
+    with pytest.raises(ValueError, match="shape"):
+        fbcache_reconstruct(fb_b, state)
+
+    # After reset, the cache is empty and reconstruct raises RuntimeError.
+    fbcache_reset(state)
+    with pytest.raises(RuntimeError, match="no cached residual"):
+        fbcache_reconstruct(fb_b, state)
+
+
+def test_fbcache_reconstruct_same_shape_still_works():
+    """Positive control: after the shape-validation fix, reconstruct
+    on matching shapes must still work unchanged."""
+    state = create_fbcache_state()
+    fb = mx.ones((1, 8, 16)) * 2.0
+    residual = mx.ones((1, 8, 16)) * 5.0
+    fbcache_update(fb, residual, state)
+
+    out = fbcache_reconstruct(fb, state)
+    assert mx.allclose(out, fb + residual)

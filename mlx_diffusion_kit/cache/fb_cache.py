@@ -176,11 +176,24 @@ def fbcache_reconstruct(
 
     Raises:
         RuntimeError: if no cached residual exists.
+        ValueError: if ``fb_output`` shape differs from the cached
+            residual shape. This happens when the model input shape
+            changed between steps without resetting the cache (e.g.,
+            resolution change in video VSR); FBCache across shape
+            changes is ill-defined and a clear error is preferable to
+            a cryptic broadcast or shape error from MLX.
     """
     if state.cached_residual is None:
         raise RuntimeError(
             "FBCache has no cached residual; the caller must compute the "
             "remaining blocks on this step."
+        )
+    if fb_output.shape != state.cached_residual.shape:
+        raise ValueError(
+            f"FBCache reconstruct shape mismatch: fb_output has shape "
+            f"{fb_output.shape} but cached residual has shape "
+            f"{state.cached_residual.shape}. The cache must be reset when "
+            f"model input shape changes. Call fbcache_reset(state) first."
         )
     return fb_output + state.cached_residual
 
