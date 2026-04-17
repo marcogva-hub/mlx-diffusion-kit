@@ -581,3 +581,28 @@
 ### Confidence
 - Overall: [HIGH]
 - Risks: FFT is taken along the last axis only. For feature maps where the last axis is the channel/embedding dim (standard DiT layout), this is correct. If a user passes features with a different axis convention, they must reshape first. Documented implicitly via the `axis=-1` contract in the docstring.
+
+---
+## [2026-04-07 10:30] Phase P7.5: B12 DiTFastAttn rebuild
+
+### Plan
+- **Objective:** Replace the 3-strategy per-head variance-profiled design with the paper's 4-strategy per-layer policy (FULL / WINDOW / SHARE / RESIDUAL).
+- **Files to modify:** `attention/ditfastattn.py` (rewrite), `attention/__init__.py`, `orchestrator.py`; `tests/test_ditfastattn.py` (rewrite).
+
+### Changes made
+- `attention/ditfastattn.py` — rewrite. Four-strategy `AttnStrategy` enum. Config: `window_start_step`, `window_size`, `sharing_layers: list[int]`, `residual_cache_layers: list[int]`. State: two caches (`cached_attn_maps`, `cached_residuals`) keyed by layer_idx. Functions: `create_ditfastattn_state`, `ditfastattn_decide`, `ditfastattn_record_attn_map`, `ditfastattn_get_cached_attn`, `ditfastattn_record_residual`, `ditfastattn_get_cached_residual`, `ditfastattn_reset`. Decision precedence documented in docstring: step==0 → FULL; RESIDUAL wins if configured+cached; SHARE wins over WINDOW; WINDOW activates at window_start_step. Safety fallback: missing cache → drop to next priority tier. [HIGH]
+- `attention/__init__.py` — expose new API. `DiTFastAttnManager` and `HeadStrategy` removed. [HIGH]
+- `orchestrator.py` — `DiTFastAttnManager` references replaced with function-based API. State storage is `_ditfastattn_state: Optional[DiTFastAttnState]`. New methods: `get_attn_strategy`, `record_attn_map`, `get_cached_attn_map`, `record_attn_residual`, `get_cached_attn_residual`. [HIGH]
+- `tests/test_ditfastattn.py` — 12 new tests: step 0 is FULL, disabled is FULL, RESIDUAL beats SHARE beats WINDOW, missing-cache safety fallback for both SHARE and RESIDUAL, WINDOW boundary, non-listed layer behavior, roundtrip for each cache, reset clears both, and a comprehensive **"four distinct strategies achievable"** test. [HIGH]
+
+### Dependency & regression check
+- grep for `DiTFastAttnManager`, `HeadStrategy`, `self._ditfastattn[^_]` → no matches outside the rewritten orchestrator internals.
+- Full test suite: 266 pass (previously 262 — net +4). No regressions.
+
+### Tech cost assessment
+- Compute: all decision functions are O(1) (list/dict membership + integer compares).
+- Memory: two dicts keyed by layer_idx. Per entry: one mx.array reference, no copy. Caller owns the underlying tensors.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: the safety fallback (missing-cache → drop to next strategy) means users who configure `sharing_layers=[0]` but forget to call `record_attn_map` will silently get WINDOW/FULL instead of SHARE. Documented in the docstring. An alternative would be to raise, but that's noisier and less forgiving.

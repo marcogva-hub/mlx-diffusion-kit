@@ -34,7 +34,7 @@ COMPONENT_MATURITY: dict[str, Maturity] = {
     "B9_DiffSparse": Maturity.STUB,
     "B10_DDiT": Maturity.BETA,
     "B11_TGATE": Maturity.STABLE,
-    "B12_DiTFastAttn": Maturity.STUB,  # P7.5 rebuild pending — prior impl had 3 strategies, missing SHARE/RESIDUAL split
+    "B12_DiTFastAttn": Maturity.BETA,  # P7.5 rebuild: 4 strategies (FULL/WINDOW/SHARE/RESIDUAL), per-layer policy
     "B13_FreeU": Maturity.STABLE,
     "B14_DPMSolver": Maturity.STABLE,
     "B14_AdaptiveStep": Maturity.BETA,

@@ -14,9 +14,16 @@ from typing import Optional
 import mlx.core as mx
 
 from mlx_diffusion_kit.attention.ditfastattn import (
+    AttnStrategy,
     DiTFastAttnConfig,
-    DiTFastAttnManager,
-    HeadStrategy,
+    DiTFastAttnState,
+    create_ditfastattn_state,
+    ditfastattn_decide,
+    ditfastattn_get_cached_attn,
+    ditfastattn_get_cached_residual,
+    ditfastattn_record_attn_map,
+    ditfastattn_record_residual,
+    ditfastattn_reset,
 )
 from mlx_diffusion_kit.cache.deep_cache import (
     DeepCacheConfig,
@@ -190,13 +197,9 @@ class DiffusionOptimizer:
         if self.config.toca and not self.config.is_single_step:
             self._toca_state = create_toca_state()
 
-        self._ditfastattn: Optional[DiTFastAttnManager] = None
+        self._ditfastattn_state: Optional[DiTFastAttnState] = None
         if self.config.ditfastattn and not self.config.is_single_step:
-            self._ditfastattn = DiTFastAttnManager(
-                self.config.num_blocks,
-                self.config.num_blocks,  # num_heads — overridden by config if needed
-                self.config.ditfastattn,
-            )
+            self._ditfastattn_state = create_ditfastattn_state()
 
         self._deep_cache_state: Optional[DeepCacheState] = None
         if self.config.deep_cache and not self.config.is_single_step:
@@ -578,8 +581,44 @@ class DiffusionOptimizer:
         )
 
     @property
-    def ditfastattn_manager(self) -> Optional[DiTFastAttnManager]:
-        return self._ditfastattn
+    def ditfastattn_state(self) -> Optional[DiTFastAttnState]:
+        return self._ditfastattn_state
+
+    # --- B12 DiTFastAttn (per-layer attention strategy policy) ---
+
+    def get_attn_strategy(self, layer_idx: int, step_idx: int) -> AttnStrategy:
+        """Return the attention strategy for a (layer, step).
+
+        FULL if DiTFastAttn is not configured. Otherwise the decision
+        comes from :func:`ditfastattn_decide`.
+        """
+        if self._ditfastattn_state is None or self.config.ditfastattn is None:
+            return AttnStrategy.FULL
+        return ditfastattn_decide(
+            layer_idx, step_idx, self.config.ditfastattn, self._ditfastattn_state
+        )
+
+    def record_attn_map(self, layer_idx: int, attn_map: mx.array) -> None:
+        """Record a post-softmax attention map for later SHARE reuse."""
+        if self._ditfastattn_state is not None:
+            ditfastattn_record_attn_map(layer_idx, attn_map, self._ditfastattn_state)
+
+    def get_cached_attn_map(self, layer_idx: int) -> Optional[mx.array]:
+        """Return a cached attention map, or None."""
+        if self._ditfastattn_state is None:
+            return None
+        return ditfastattn_get_cached_attn(layer_idx, self._ditfastattn_state)
+
+    def record_attn_residual(self, layer_idx: int, residual: mx.array) -> None:
+        """Record an attention-block residual for later RESIDUAL reuse."""
+        if self._ditfastattn_state is not None:
+            ditfastattn_record_residual(layer_idx, residual, self._ditfastattn_state)
+
+    def get_cached_attn_residual(self, layer_idx: int) -> Optional[mx.array]:
+        """Return a cached attention residual, or None."""
+        if self._ditfastattn_state is None:
+            return None
+        return ditfastattn_get_cached_residual(layer_idx, self._ditfastattn_state)
 
     @property
     def deep_cache_state(self) -> Optional[DeepCacheState]:
@@ -642,8 +681,8 @@ class DiffusionOptimizer:
             self._encoder_sharing_state = create_encoder_sharing_state()
         if self._toca_state is not None:
             toca_reset(self._toca_state)
-        if self._ditfastattn is not None:
-            self._ditfastattn.reset()
+        if self._ditfastattn_state is not None:
+            ditfastattn_reset(self._ditfastattn_state)
         if self._deep_cache_state is not None:
             deepcache_reset(self._deep_cache_state)
         if self._multigranular is not None:
