@@ -154,3 +154,33 @@ def test_mode_b_bridge_builds_working_module():
     y = mod(x)
     assert y.shape == (1, 3, 6, 6, out)
     assert mx.all(mx.isfinite(y)).item()
+
+
+def test_mode_b_forward_matches_dense_conv3d_at_full_rank():
+    """The composed separable module at full rank must produce the same
+    forward output as a dense nn.Conv3d with the original kernel.
+
+    This is the user-facing contract for Mode B: full-rank decomposition
+    must preserve forward behavior, not just weight-matrix reconstruction.
+    A transpose/reshape bug inside decompose_conv3d_to_separable could
+    silently corrupt the forward pass while still passing the weight-
+    reconstruction test (since the same factorization reassembles to the
+    same matrix regardless of axis ordering).
+    """
+    mx.random.seed(42)
+    out, kT, kH, kW, inp = 4, 3, 3, 3, 3
+    W = mx.random.normal((out, kT, kH, kW, inp))
+
+    ref = nn.Conv3d(inp, out, (kT, kH, kW), bias=False)
+    ref.weight = W
+
+    sp, tp, _ = decompose_conv3d_to_separable(W, rank=None)
+    mod = build_separable_from_decomposition(sp, tp, inp, out, (kT, kH, kW))
+
+    x = mx.random.normal((1, 5, 5, 5, inp))
+    y_ref = ref(x)
+    y_sep = mod(x)
+    assert mx.allclose(y_ref, y_sep, atol=1e-3, rtol=1e-3), (
+        f"Mode B forward diverged from dense Conv3d: "
+        f"max abs diff = {float(mx.max(mx.abs(y_ref - y_sep))):.6e}"
+    )
