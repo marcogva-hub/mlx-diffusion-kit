@@ -23,18 +23,18 @@ class Maturity(Enum):
 
 COMPONENT_MATURITY: dict[str, Maturity] = {
     "B1_TeaCache": Maturity.STABLE,
-    "B2_FBCache": Maturity.BETA,
-    "B3_SpectralCache": Maturity.BETA,
+    "B2_FBCache": Maturity.STUB,  # P7.2 rebuild pending — prior impl had wrong semantics
+    "B3_SpectralCache": Maturity.STUB,  # P7.4 rebuild pending — prior impl was step-skip, not freq-domain caching
     "B4_SmoothCache": Maturity.STABLE,
-    "B5_DeepCache": Maturity.BETA,
+    "B5_DeepCache": Maturity.STUB,  # P7.1 rebuild pending — prior impl was generic layer cache, not UNet deep-branch
     "B6_MultiGranular": Maturity.BETA,
-    "B7_ToCa": Maturity.BETA,
+    "B7_ToCa": Maturity.STUB,  # P7.3 rebuild pending — prior impl was single-step cosine, not velocity-based
     "B8_ToMe": Maturity.STABLE,
     "B8_ToPi": Maturity.BETA,
     "B9_DiffSparse": Maturity.STUB,
     "B10_DDiT": Maturity.BETA,
     "B11_TGATE": Maturity.STABLE,
-    "B12_DiTFastAttn": Maturity.EXPERIMENTAL,
+    "B12_DiTFastAttn": Maturity.STUB,  # P7.5 rebuild pending — prior impl had 3 strategies, missing SHARE/RESIDUAL split
     "B13_FreeU": Maturity.STABLE,
     "B14_DPMSolver": Maturity.STABLE,
     "B14_AdaptiveStep": Maturity.BETA,

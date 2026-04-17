@@ -435,3 +435,41 @@
 
 ### Confidence
 - Overall: [HIGH]
+
+---
+## [2026-04-07 08:00] Phase P7.0: Honest rebuild — baseline reset
+
+### Plan
+- **Objective:** Reset the maturity of B2/B3/B5/B7/B12 to STUB because the current implementations are algorithmically incorrect when audited against the original prompt specification. Re-implement correctly across P7.1–P7.6.
+- **Files to modify:** `mlx_diffusion_kit/maturity.py` (downgrade 5 entries), `devnotes/SESSION_LOG.md` (this entry).
+- **Dependencies impacted:** None yet — no code deleted or rewritten in this phase. Per-phase cleanup happens in P7.1–P7.5.
+
+### Audit findings that motivated the reset
+- **B5 DeepCache** was a generic per-layer cache (`dict[int, mx.array]`) with auto-selection of "middle" indices. It had no notion of UNet deep-branch semantics. Correct algorithm caches the bottleneck output as a single tensor and recomputes only the shallow encoder/decoder layers each step.
+- **B2 FBCache** used the first-block output as a skip signal but cached and returned the **entire model output**. Correct algorithm caches the **residual** (full_output − fb_output) and reconstructs as `fb_output + cached_residual`, skipping only the remaining blocks. Also missing `start_step`/`end_step`.
+- **B7 ToCa** used single-step cosine similarity with a single global cache. Correct algorithm needs per-layer state and **L1-velocity scoring** across ≥2 previous steps. Also contained a Python `for b_idx in range(B)` loop — the same anti-pattern fixed earlier in ToMe.
+- **B3 SpectralCache** was a step-level skip decision using HF magnitude change as signal. Correct algorithm caches **LF Fourier coefficients** across steps, recomputes HF each step, and **reconstructs via inverse transform**. None of the frequency-domain caching existed.
+- **B12 DiTFastAttn** had 3 strategies (FULL/WINDOW/CACHED) with variance-based auto-profiling. Correct design per prompt has 4 strategies (FULL/WINDOW/SHARE/RESIDUAL) with explicit per-layer config lists.
+
+### Rebuild decisions approved by user (R1 path)
+- Delete the 5 modules and their tests. New tests derived from algorithm input/output contract, not from the candidate code.
+- **B19** Flash-VAED / Neodragon decoder distill: skip (separate project).
+- **B3** SpectralCache: implement SeaCache variant (`spectral_velocity_aware` flag) in the same pass.
+- **B12** DiTFastAttn: follow prompt spec exactly — 4 strategies, `sharing_layers`/`residual_cache_layers` config lists, per-layer (not per-head) decisions.
+- **B18** Separable Conv3D: implementer's judgment. Plan: Mode A = `nn.Module` R(2+1)D block for new models; Mode B = SVD decomposition of pretrained `conv3d` weights into (spatial_2D, temporal_1D) factors with reported reconstruction error.
+- **MosaicDiff** (redundancy analyzer, previously bundled with DeepCache): move to a separate module so the new DeepCache file stays surgical. Preserves `scripts/analyze_layer_redundancy.py` functionality.
+
+### Changes made
+- `maturity.py:L21-L39` — B2/B3/B5/B7/B12 downgraded to STUB with inline rationale [HIGH]
+- `devnotes/SESSION_LOG.md` — this entry [HIGH]
+
+### Dependency & regression check
+- No code deleted in this phase. Existing 245 tests still pass (tested before this commit).
+- Per-phase integration-point rewiring in the orchestrator happens inside each P7.N commit.
+
+### Tech cost assessment
+- N/A (metadata + docs only)
+
+### Confidence
+- Overall: [HIGH]
+- Risks: none for this setup commit. Per-phase risks logged in each P7.N entry.
