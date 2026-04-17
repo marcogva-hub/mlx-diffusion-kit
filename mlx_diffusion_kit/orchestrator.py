@@ -18,7 +18,15 @@ from mlx_diffusion_kit.attention.ditfastattn import (
     DiTFastAttnManager,
     HeadStrategy,
 )
-from mlx_diffusion_kit.cache.deep_cache import DeepCacheConfig, DeepCacheManager
+from mlx_diffusion_kit.cache.deep_cache import (
+    DeepCacheConfig,
+    DeepCacheState,
+    create_deepcache_state,
+    deepcache_get,
+    deepcache_reset,
+    deepcache_should_recompute,
+    deepcache_store,
+)
 from mlx_diffusion_kit.cache.motion import MotionConfig, MotionTracker
 from mlx_diffusion_kit.cache.fbcache import (
     FBCacheConfig,
@@ -179,11 +187,9 @@ class DiffusionOptimizer:
                 self.config.ditfastattn,
             )
 
-        self._deep_cache: Optional[DeepCacheManager] = None
+        self._deep_cache_state: Optional[DeepCacheState] = None
         if self.config.deep_cache and not self.config.is_single_step:
-            self._deep_cache = DeepCacheManager(
-                self.config.num_blocks, self.config.deep_cache
-            )
+            self._deep_cache_state = create_deepcache_state()
 
         self._multigranular: Optional[MultiGranularCache] = None
         if self.config.multigranular and self.config.multigranular.enabled:
@@ -489,28 +495,35 @@ class DiffusionOptimizer:
         return self._ditfastattn
 
     @property
-    def deep_cache_manager(self) -> Optional[DeepCacheManager]:
-        return self._deep_cache
+    def deep_cache_state(self) -> Optional[DeepCacheState]:
+        return self._deep_cache_state
 
-    def should_compute_layer_deep(self, layer_idx: int, step_idx: int) -> bool:
-        """Check if a UNet layer should be computed (DeepCache).
+    def should_recompute_deep(self, step_idx: int) -> bool:
+        """Decide whether to run the UNet deep branch this step (DeepCache).
 
-        Returns True if DeepCache is not configured or for non-cached layers.
+        Returns True if DeepCache is not configured (caller recomputes), or
+        if the caching policy says this step must recompute.
         """
-        if self._deep_cache is None:
+        if self._deep_cache_state is None or self.config.deep_cache is None:
             return True
-        return self._deep_cache.should_compute_layer(layer_idx, step_idx)
+        return deepcache_should_recompute(
+            step_idx, self.config.deep_cache, self._deep_cache_state
+        )
 
-    def get_deep_cached_layer(self, layer_idx: int) -> Optional[mx.array]:
-        """Retrieve DeepCache cached output for a layer."""
-        if self._deep_cache is None:
+    def get_cached_deep_features(self) -> Optional[mx.array]:
+        """Retrieve the cached deep-branch features, or None if absent."""
+        if self._deep_cache_state is None:
             return None
-        return self._deep_cache.get_cached_layer(layer_idx)
+        return deepcache_get(self._deep_cache_state)
 
-    def update_deep_cache_layer(self, layer_idx: int, step_idx: int, output: mx.array) -> None:
-        """Update DeepCache for a layer."""
-        if self._deep_cache is not None:
-            self._deep_cache.update_layer(layer_idx, step_idx, output)
+    def store_deep_features(self, features: mx.array, step_idx: int) -> None:
+        """Record freshly computed deep-branch features.
+
+        Must be called by the model wrapper on every step that actually
+        runs the deep branch, immediately after computing it.
+        """
+        if self._deep_cache_state is not None:
+            deepcache_store(features, step_idx, self._deep_cache_state)
 
     @property
     def motion_tracker(self) -> Optional[MotionTracker]:
@@ -544,8 +557,8 @@ class DiffusionOptimizer:
             self._toca.reset()
         if self._ditfastattn is not None:
             self._ditfastattn.reset()
-        if self._deep_cache is not None:
-            self._deep_cache.reset()
+        if self._deep_cache_state is not None:
+            deepcache_reset(self._deep_cache_state)
         if self._multigranular is not None:
             self._multigranular.clear()
         self._last_merge_info = None

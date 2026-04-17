@@ -1,207 +1,132 @@
-"""B5 — DeepCache + MosaicDiff: Layer-level caching for UNet models.
+"""B5 — DeepCache: Skip UNet deep-branch computation across diffusion steps.
 
-Skips entire UNet layers between denoising steps. Middle (bottleneck) layers
-change least → cache them and only recompute input/output layers.
+Algorithm (Ma et al., CVPR 2024):
+    In UNet architectures, the deep (bottleneck) features change slowly across
+    diffusion steps because they encode high-level semantics that are stable
+    over denoising. The shallow encoder/decoder layers, by contrast, change
+    every step as they refine fine spatial detail. DeepCache exploits this
+    by caching the bottleneck output for N consecutive steps and reusing it,
+    recomputing only the shallow layers each step.
 
-Applicable to 3 UNet multi-step models: DAM-VSR, DiffVSR, VEnhancer.
-Estimated impact: 2.2-3.2x on UNet backbone.
+Module contract:
+    This module does not know the structure of the user's UNet. It provides:
+      1. A per-step decision: "must I recompute the deep branch this step?"
+      2. A store for the most recent deep-branch output (single tensor).
+      3. A retrieval accessor.
 
-MosaicDiff provides principled layer selection via weight redundancy analysis.
+    The model wrapper is responsible for splitting its forward pass at the
+    deep/shallow boundary and calling this module at those two points.
+
+Applies to: UNet multi-step VSR models (DAM-VSR, DiffVSR, DLoRAL, UltraVSR,
+    VEnhancer). The single-step flag on OrchestratorConfig disables it
+    automatically for SeedVR2/DOVE/FlashVSR.
+
+Reference: Ma, Fang, Wang. "DeepCache: Accelerating Diffusion Models for Free."
+    CVPR 2024. https://arxiv.org/abs/2312.00858
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import mlx.core as mx
 
 
-# ---------------------------------------------------------------------------
-# DeepCache
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class DeepCacheConfig:
+    """Configuration for the DeepCache deep-branch caching policy.
+
+    Attributes:
+        cache_interval: Recompute the deep branch once every N steps
+            (N=1 means no caching; N=3 is the paper's default and a
+            conservative quality/speed tradeoff).
+        start_step: Index of the first step at which caching is allowed.
+            Before this step the deep branch is always recomputed so the
+            cache is populated before any reuse happens.
+        enabled: Master switch.
+    """
+
     cache_interval: int = 3
-    cached_layer_indices: Optional[list[int]] = None
-    auto_cache_ratio: float = 0.5
+    start_step: int = 0
     enabled: bool = True
 
 
 @dataclass
 class DeepCacheState:
-    layer_cache: dict[int, mx.array] = field(default_factory=dict)
-    last_full_step: int = -1
-    skip_count: int = 0
+    """Mutable state for DeepCache.
 
-
-class DeepCacheManager:
-    """Manages per-layer caching for UNet architectures.
-
-    Automatically selects bottleneck layers for caching if no explicit
-    indices are provided. Cached layers are recomputed every cache_interval
-    steps; between those steps, their cached output is reused.
+    Attributes:
+        cached_deep_features: Most recently computed deep-branch output
+            (single tensor, shape model-dependent). None before the first
+            compute of this inference run.
+        last_recompute_step: Step index at which the deep branch was last
+            actually computed. -1 before the first compute.
+        recompute_count: Number of real recomputes this run (for telemetry).
     """
 
-    def __init__(self, total_layers: int, config: Optional[DeepCacheConfig] = None):
-        self.config = config or DeepCacheConfig()
-        self.total_layers = total_layers
-        self._state = DeepCacheState()
-
-        if self.config.cached_layer_indices is not None:
-            self._cached_set = set(self.config.cached_layer_indices)
-        else:
-            self._cached_set = self._auto_select_layers()
-
-    def _auto_select_layers(self) -> set[int]:
-        """Auto-select middle layers (bottleneck region) for caching."""
-        n = self.total_layers
-        if n <= 2:
-            return set()
-
-        # Middle region: N//4 to 3*N//4
-        start = n // 4
-        end = (3 * n) // 4
-        candidates = list(range(start, end))
-
-        n_cache = max(1, int(len(candidates) * self.config.auto_cache_ratio))
-        # Pick from the center outward
-        mid = len(candidates) // 2
-        selected = sorted(candidates[mid - n_cache // 2: mid - n_cache // 2 + n_cache])
-        return set(selected)
-
-    def should_compute_layer(self, layer_idx: int, step_idx: int) -> bool:
-        """Check if a layer should be computed at this step.
-
-        Non-cached layers always compute. Cached layers compute only
-        at cache_interval boundaries.
-
-        Args:
-            layer_idx: Layer index.
-            step_idx: Current denoising step.
-
-        Returns:
-            True if the layer should be computed.
-        """
-        if not self.config.enabled:
-            return True
-
-        if layer_idx not in self._cached_set:
-            return True
-
-        # Always compute on first step or at interval boundaries
-        if self._state.last_full_step < 0:
-            return True
-
-        return step_idx - self._state.last_full_step >= self.config.cache_interval
-
-    def get_cached_layer(self, layer_idx: int) -> Optional[mx.array]:
-        """Retrieve cached output for a layer."""
-        return self._state.layer_cache.get(layer_idx)
-
-    def update_layer(self, layer_idx: int, step_idx: int, output: mx.array) -> None:
-        """Update the cache for a layer.
-
-        Also updates last_full_step if this is a cached layer.
-        """
-        if layer_idx in self._cached_set:
-            self._state.layer_cache[layer_idx] = output
-            self._state.last_full_step = step_idx
-
-    def get_cached_layers(self) -> set[int]:
-        """Return indices of layers selected for caching."""
-        return set(self._cached_set)
-
-    def reset(self) -> None:
-        """Clear all cached state."""
-        self._state = DeepCacheState()
+    cached_deep_features: Optional[mx.array] = None
+    last_recompute_step: int = -1
+    recompute_count: int = 0
 
 
-# ---------------------------------------------------------------------------
-# MosaicDiff — Layer Redundancy Scoring
-# ---------------------------------------------------------------------------
+def create_deepcache_state() -> DeepCacheState:
+    """Create a fresh DeepCacheState for a new inference run."""
+    return DeepCacheState()
 
 
-def analyze_layer_redundancy(
-    layer_weights: dict[int, mx.array],
-    method: str = "cosine",
-) -> dict[int, float]:
-    """Score each layer by its redundancy with adjacent layers.
+def deepcache_should_recompute(
+    step_idx: int,
+    config: DeepCacheConfig,
+    state: DeepCacheState,
+) -> bool:
+    """Decide whether to recompute the deep branch at this step.
 
-    Layers with high redundancy are good candidates for caching — their
-    computation is largely duplicated by their neighbors.
+    Returns True if the caller must run the full deep branch this step.
+    Returns False if the caller must reuse ``state.cached_deep_features``.
 
-    Args:
-        layer_weights: {layer_idx: weight_tensor} for each layer.
-        method: "cosine" (cosine similarity) or "l2" (inverse L2 distance).
+    The decision rules (checked in order):
 
-    Returns:
-        {layer_idx: redundancy_score} normalized to [0, 1].
-        Higher score = more redundant = better caching candidate.
+      1. If caching is disabled → always recompute.
+      2. If the step is before ``config.start_step`` → always recompute.
+      3. If no cache exists yet (``cached_deep_features is None``) → recompute.
+      4. If (step_idx − last_recompute_step) >= ``cache_interval`` → recompute.
+      5. Otherwise → reuse cached deep features.
+
+    Delta-based arithmetic is used (not modulo) so the policy remains
+    correct when upstream components like TeaCache skip some steps and
+    the caller calls DeepCache on a non-contiguous step sequence.
     """
-    if len(layer_weights) < 2:
-        return {idx: 0.0 for idx in layer_weights}
-
-    indices = sorted(layer_weights.keys())
-    flat = {idx: layer_weights[idx].reshape(-1).astype(mx.float32) for idx in indices}
-
-    raw_scores: dict[int, float] = {}
-    for i, idx in enumerate(indices):
-        sim_sum = 0.0
-        count = 0
-
-        for neighbor in [i - 1, i + 1]:
-            if 0 <= neighbor < len(indices):
-                n_idx = indices[neighbor]
-                a = flat[idx]
-                b = flat[n_idx]
-
-                # Ensure same size for comparison
-                min_len = min(a.shape[0], b.shape[0])
-                a = a[:min_len]
-                b = b[:min_len]
-
-                if method == "cosine":
-                    norm_a = mx.linalg.norm(a) + 1e-8
-                    norm_b = mx.linalg.norm(b) + 1e-8
-                    sim = (mx.sum(a * b) / (norm_a * norm_b)).item()
-                elif method == "l2":
-                    dist = mx.linalg.norm(a - b).item()
-                    sim = 1.0 / (1.0 + dist)
-                else:
-                    raise ValueError(f"Unknown method: {method}")
-
-                sim_sum += sim
-                count += 1
-
-        raw_scores[idx] = sim_sum / max(count, 1)
-
-    # Normalize to [0, 1]
-    if not raw_scores:
-        return {}
-    min_s = min(raw_scores.values())
-    max_s = max(raw_scores.values())
-    rng = max_s - min_s
-    if rng < 1e-10:
-        # All scores identical — if they're high (>0.5), all redundant
-        avg = sum(raw_scores.values()) / len(raw_scores)
-        return {k: 1.0 if avg > 0.5 else 0.0 for k in raw_scores}
-    return {k: (v - min_s) / rng for k, v in raw_scores.items()}
+    if not config.enabled:
+        return True
+    if step_idx < config.start_step:
+        return True
+    if state.cached_deep_features is None:
+        return True
+    return step_idx - state.last_recompute_step >= config.cache_interval
 
 
-def select_cacheable_layers(
-    redundancy_scores: dict[int, float],
-    ratio: float = 0.5,
-) -> list[int]:
-    """Select the most redundant layers for caching.
+def deepcache_store(
+    features: mx.array,
+    step_idx: int,
+    state: DeepCacheState,
+) -> None:
+    """Store freshly computed deep-branch features.
 
-    Args:
-        redundancy_scores: {layer_idx: redundancy_score}.
-        ratio: Fraction of layers to select.
-
-    Returns:
-        Sorted list of layer indices to cache.
+    Must be called immediately after the deep branch is computed on a
+    recompute step. Updates ``last_recompute_step`` so the next call to
+    ``deepcache_should_recompute`` measures the delta from this step.
     """
-    n_select = max(1, int(len(redundancy_scores) * ratio))
-    sorted_by_score = sorted(redundancy_scores.items(), key=lambda x: -x[1])
-    return sorted([idx for idx, _ in sorted_by_score[:n_select]])
+    state.cached_deep_features = features
+    state.last_recompute_step = step_idx
+    state.recompute_count += 1
+
+
+def deepcache_get(state: DeepCacheState) -> Optional[mx.array]:
+    """Return the cached deep-branch features, or None if not populated."""
+    return state.cached_deep_features
+
+
+def deepcache_reset(state: DeepCacheState) -> None:
+    """Clear the cache (e.g., at the start of a new inference run)."""
+    state.cached_deep_features = None
+    state.last_recompute_step = -1
+    state.recompute_count = 0

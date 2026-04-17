@@ -26,7 +26,7 @@ COMPONENT_MATURITY: dict[str, Maturity] = {
     "B2_FBCache": Maturity.STUB,  # P7.2 rebuild pending — prior impl had wrong semantics
     "B3_SpectralCache": Maturity.STUB,  # P7.4 rebuild pending — prior impl was step-skip, not freq-domain caching
     "B4_SmoothCache": Maturity.STABLE,
-    "B5_DeepCache": Maturity.STUB,  # P7.1 rebuild pending — prior impl was generic layer cache, not UNet deep-branch
+    "B5_DeepCache": Maturity.BETA,  # P7.1 rebuild: UNet deep-branch caching per paper
     "B6_MultiGranular": Maturity.BETA,
     "B7_ToCa": Maturity.STUB,  # P7.3 rebuild pending — prior impl was single-step cosine, not velocity-based
     "B8_ToMe": Maturity.STABLE,

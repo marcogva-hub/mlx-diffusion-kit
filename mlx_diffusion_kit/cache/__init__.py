@@ -9,7 +9,14 @@ from mlx_diffusion_kit.cache.motion import (
 )
 from mlx_diffusion_kit.cache.deep_cache import (
     DeepCacheConfig,
-    DeepCacheManager,
+    DeepCacheState,
+    create_deepcache_state,
+    deepcache_get,
+    deepcache_reset,
+    deepcache_should_recompute,
+    deepcache_store,
+)
+from mlx_diffusion_kit.cache.layer_redundancy import (
     analyze_layer_redundancy,
     select_cacheable_layers,
 )
@@ -66,7 +73,13 @@ from mlx_diffusion_kit.cache.teacache import (
 __all__ = [
     # B5 DeepCache
     "DeepCacheConfig",
-    "DeepCacheManager",
+    "DeepCacheState",
+    "create_deepcache_state",
+    "deepcache_get",
+    "deepcache_reset",
+    "deepcache_should_recompute",
+    "deepcache_store",
+    # MosaicDiff layer redundancy (formerly bundled with DeepCache)
     "analyze_layer_redundancy",
     "select_cacheable_layers",
     # B2 FBCache
@@ -112,4 +125,10 @@ __all__ = [
     "create_smooth_cache_state",
     "smooth_cache_interpolate",
     "smooth_cache_record",
+    # WorldCache motion
+    "MotionConfig",
+    "MotionTracker",
+    "estimate_motion",
+    "motion_adjusted_threshold",
+    "warp_features_by_motion",
 ]

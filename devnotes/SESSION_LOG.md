@@ -473,3 +473,33 @@
 ### Confidence
 - Overall: [HIGH]
 - Risks: none for this setup commit. Per-phase risks logged in each P7.N entry.
+
+---
+## [2026-04-07 08:30] Phase P7.1: B5 DeepCache rebuild
+
+### Plan
+- **Objective:** Replace the generic per-layer cache masquerading as DeepCache with a paper-faithful deep-branch caching policy. Move the MosaicDiff redundancy analyzer (previously bundled) to its own module.
+- **Files to modify:** `cache/deep_cache.py` (rewrite), `cache/layer_redundancy.py` (new), `cache/__init__.py`, `orchestrator.py`, `scripts/analyze_layer_redundancy.py`; `tests/test_deep_cache.py` (rewrite), `tests/test_layer_redundancy.py` (new), `tests/test_analyze_redundancy.py` (delete — superseded).
+- **Dependencies impacted:** orchestrator (rewired), analyze script (import path change).
+
+### Changes made
+- `cache/deep_cache.py` — rewrite. New API: `DeepCacheConfig{cache_interval, start_step, enabled}`, `DeepCacheState{cached_deep_features, last_recompute_step, recompute_count}`, plus `create_deepcache_state`, `deepcache_should_recompute`, `deepcache_store`, `deepcache_get`, `deepcache_reset`. Decision is delta-based, not modulo, so TeaCache-skipped step sequences remain correct. [HIGH]
+- `cache/layer_redundancy.py` — new. `analyze_layer_redundancy` and `select_cacheable_layers` moved here, unchanged in behavior. Docstring clarifies this is a tooling utility, not a runtime cache. [HIGH]
+- `cache/__init__.py` — expose new DeepCache API + MotionConfig/MotionTracker (previously forgotten from __all__). [HIGH]
+- `orchestrator.py` — DeepCacheManager-based methods removed. New: `should_recompute_deep`, `get_cached_deep_features`, `store_deep_features`, plus `deep_cache_state` property. Integration contract documented: the caller's model wrapper splits at the deep/shallow boundary and invokes these. [HIGH]
+- `scripts/analyze_layer_redundancy.py:L17` — import path updated to `cache.layer_redundancy`. [HIGH]
+- `tests/test_deep_cache.py` — 10 new tests derived from the algorithm contract: first-step recompute, store-then-reuse-until-interval, exact state mutation, disabled passthrough, start_step respected, delta-based correctness under non-contiguous step indices, interval=1 edge case, reset, get-on-fresh, recompute-count telemetry. [HIGH]
+- `tests/test_layer_redundancy.py` — 8 new tests: single-layer zero score, all-identical full redundancy, mixed-weight ranking, score bounds, l2 method, ratio selection, min selection size, sorted output. [HIGH]
+- `tests/test_analyze_redundancy.py` — deleted (superseded by test_layer_redundancy). [HIGH]
+
+### Dependency & regression check
+- grep for `DeepCacheManager`, `should_compute_layer_deep`, `get_deep_cached_layer`, `update_deep_cache_layer`, `deep_cache_manager`, `analyze_layer_redundancy`, `select_cacheable_layers` in tests/, mlx_diffusion_kit/, scripts/ → only expected references remain.
+- Full test suite: 249 pass (previously 245 — net +4 because redundancy now has 8 tests vs the prior 3). No regressions.
+
+### Tech cost assessment
+- Compute: decision is O(1) per step. Store is O(1) (reference assignment). No FFT, no matrix ops.
+- Memory: one cached tensor (size model-dependent). No per-layer dict.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: model wrappers that previously called `should_compute_layer_deep(layer_idx, step_idx)` are incompatible. Since this API was undocumented/internal and not exported at top-level, no external breakage. Internal orchestrator tests did not use it.
