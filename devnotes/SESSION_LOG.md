@@ -659,3 +659,59 @@
 ### Confidence
 - Overall: [HIGH]
 - Next: ready for user review on the branch. Per the prompt, no push until review. Once reviewed, merge `feat/readme-backlog-p7` into `main` and tag as needed (not `v0.1.0` since that tag is already on the original release — next tag should be `v0.2.0` or a pre-release like `v0.2.0-rc.1` because the external API changed in non-trivial ways).
+
+---
+## [2026-04-07 12:30] Phase P8.0: Post-review fixes from mlx-code-review P7 audit
+
+### Plan
+- **Objective:** Apply the four fixes surfaced by the `mlx-code-review` skill's audit of branch `feat/readme-backlog-p7`:
+  (1) remove SpectralCache force-refresh from `update_step_cache` (silent correctness bug — orchestrator wiring introduced in P7.4);
+  (2) add a B18 forward-equivalence test (contract guarantee previously untested);
+  (3) add a `bias` parameter to `build_separable_from_decomposition` (previously silently dropped bias);
+  (4) add shape validation to `fbcache_reconstruct` (previously produced cryptic MLX errors on shape mismatch).
+- **Files to modify:** `mlx_diffusion_kit/orchestrator.py`, `mlx_diffusion_kit/vae/separable_conv3d.py`, `mlx_diffusion_kit/cache/fb_cache.py`, `tests/test_orchestrator.py`, `tests/test_separable_conv3d.py`, `tests/test_fb_cache.py`.
+- **Dependencies impacted:**
+  - `orchestrator.py` drops the `spectral_cache_update` import — external top-level API unchanged.
+  - `build_separable_from_decomposition` gains an optional `bias` kwarg (backward compatible).
+  - No other user-facing API changes.
+
+### Changes made
+- `orchestrator.py:58-62` — removed `spectral_cache_update` from the import group [HIGH]
+- `orchestrator.py:387-395` — removed the SpectralCache block from `update_step_cache` and replaced with a comment explaining why the orchestrator must not touch SpectralCache state here [HIGH]
+- `vae/separable_conv3d.py:238-292` — added optional `bias: Optional[mx.array] = None` parameter to `build_separable_from_decomposition`; when supplied, installed on `mod.temporal.bias` [HIGH]
+- `cache/fb_cache.py:168-195` — added `ValueError` in `fbcache_reconstruct` when `fb_output.shape != state.cached_residual.shape`, with a message pointing the caller to `fbcache_reset` [HIGH]
+- `tests/test_orchestrator.py` — 1 new test: `test_spectral_cache_state_not_corrupted_by_update_step_cache`. Uses deliberately different shapes for `modulated_input` and `apply_spectral_cache` features to make any coupling between them visible. Passes after the fix; would have crashed on shape mismatch before [HIGH]
+- `tests/test_separable_conv3d.py` — 3 new tests: `test_mode_b_forward_matches_dense_conv3d_at_full_rank` (contract guarantee — max-abs-diff ~1.4e-5 on `(4,3,3,3,3)` kernel), `test_build_separable_preserves_bias` (per-channel mean of `with-bias − without-bias` output equals the bias element), `test_build_separable_no_bias_by_default` (no implicit zero bias is created when `bias=None`) [HIGH]
+- `tests/test_fb_cache.py` — 2 new tests: `test_fbcache_reconstruct_raises_on_shape_mismatch` (positive case for new ValueError; also re-checks the RuntimeError path still fires post-reset) and `test_fbcache_reconstruct_same_shape_still_works` (negative control: same-shape path unchanged) [HIGH]
+
+### Dependency & regression check
+- `grep -n spectral_cache_update mlx_diffusion_kit/orchestrator.py` → empty ✓
+- `grep -n "bias=False" mlx_diffusion_kit/vae/separable_conv3d.py` inspected: only remaining occurrences are in `SeparableConv3D.__init__` (line 114, the R(2+1)D spatial stage which correctly carries no bias — bias belongs on the temporal stage mathematically) and in docstring lines — the bridge function no longer contains a hardcoded `bias=False` ✓
+- `python -c "from mlx_diffusion_kit import *"` → no ImportError ✓
+- Full test suite: **282 pass, 0 failures** (up from 276 baseline on `main`; net +6 from this phase: 4 explicitly required by the prompt + 2 positive-control tests for robustness) ✓
+- No existing tests were modified — only new tests added.
+
+### Tech cost assessment
+- Fix 1: removes one unconditional function call (`spectral_cache_update`) per `update_step_cache` invocation. Net compute: -1 rFFT + -1 magnitude per call. Negligible.
+- Fix 2: adds one forward-pass comparison per test run. Negligible.
+- Fix 3: adds one optional parameter. No compute change when `bias=None` (default). When `bias` is supplied, one additional bias add per forward pass — but that was presumably the intent of the pretrained bias being kept in the first place.
+- Fix 4: adds one shape comparison per `fbcache_reconstruct` call. Tuple equality — O(1). Negligible.
+
+### Deferred (acknowledged, not implemented in P8)
+- **Integration tests covering the rebuilt components end-to-end** through `DiffusionOptimizer` (review finding #3). Slated for a future P9 phase. Lower priority now that Fix 1 closes the most likely integration-level bug.
+- **`analyze_layer_redundancy` `.item()`-in-loop** (review finding #6). Acceptable for an offline analysis tool; not worth vectorizing unless it becomes a bottleneck in practice.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: Fix 1 is the only behavior change with user-visible consequences. Callers who relied on the incorrect force-refresh semantics for SpectralCache must now explicitly call `apply_spectral_cache` with the feature stream they want cached. This is documented in the in-code comment and in the CHANGELOG already covers the orchestrator API moves. Pre-1.0 library; acceptable.
+
+### Commit sequence on this branch
+```
+e7fe0b4 fix(orchestrator): remove SpectralCache force-refresh from update_step_cache
+f27e2b4 test(B18): add forward-equivalence test for Mode B at full rank
+c2a0a73 feat(B18): add bias parameter to build_separable_from_decomposition
+11298b0 feat(fbcache): validate shapes in fbcache_reconstruct
+```
+
+### Status
+Ready for merge review on `feat/readme-backlog-p7`. No push yet per prompt directive.
