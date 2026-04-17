@@ -296,3 +296,73 @@ def test_spectral_cache_state_not_corrupted_by_update_step_cache():
     y1 = opt.apply_spectral_cache(features_1, step_idx=1)
     assert y1.shape == features_shape
     assert mx.all(mx.isfinite(y1)).item()
+
+
+def test_motion_adjusted_threshold_does_not_mutate_user_config_on_exception():
+    """P9.0 regression: if teacache_should_compute raises mid-call on the
+    motion-adjusted path, the user-supplied TeaCacheConfig must not be
+    left in a mutated state.
+
+    The pre-P9 implementation saved the original threshold, mutated the
+    config in place, called teacache_should_compute, then restored the
+    original. On any exception raised by teacache_should_compute, the
+    restore line was unreachable and the user's config stayed corrupted
+    at the motion-adjusted value forever.
+
+    The fix uses dataclasses.replace so the user's config is never touched.
+    """
+    import pytest
+    from mlx_diffusion_kit.cache.teacache import TeaCacheConfig
+    from mlx_diffusion_kit.cache.motion import MotionConfig
+
+    tc_cfg = TeaCacheConfig(
+        rel_l1_thresh=0.3,
+        motion=MotionConfig(enabled=True, sensitivity=2.0),
+    )
+    orig_thresh = tc_cfg.rel_l1_thresh
+
+    opt_cfg = OrchestratorConfig(
+        teacache=tc_cfg,
+        is_single_step=False,
+        num_blocks=4,
+        total_steps=5,
+    )
+    opt = DiffusionOptimizer(opt_cfg)
+
+    # Frame is small — motion tracker will compute a non-zero magnitude
+    # against the implicit second frame, activating the adjusted-threshold
+    # path on step 1.
+    frame_a = mx.zeros((8, 8, 3))
+    frame_b = mx.ones((8, 8, 3))
+
+    # Step 0: decide, then explicitly update the cache so
+    # prev_modulated_input becomes non-None.
+    opt.should_compute_step(
+        step_idx=0,
+        modulated_input=mx.ones((1, 8)),
+        frame=frame_a,
+    )
+    opt.update_step_cache(
+        modulated_input=mx.ones((1, 8)),
+        output=mx.zeros((1, 8)),
+        step_idx=0,
+    )
+    assert opt._teacache_state.prev_modulated_input is not None
+
+    # Corrupt the state so teacache_should_compute raises when it tries
+    # to subtract current from prev on the next call.
+    opt._teacache_state.prev_modulated_input = "not-a-tensor"
+
+    with pytest.raises(Exception):  # ValueError from mlx, exact type incidental
+        opt.should_compute_step(
+            step_idx=1,
+            modulated_input=mx.ones((1, 8)),
+            frame=frame_b,
+        )
+
+    # THE KEY ASSERTION: user's config must be unchanged after the throw.
+    # Pre-fix, this would be set to the motion-adjusted value.
+    assert tc_cfg.rel_l1_thresh == orig_thresh, (
+        f"Config corrupted on exception path: expected {orig_thresh}, "
+        f"got {tc_cfg.rel_l1_thresh}"
+    )

@@ -7,7 +7,7 @@ into a unified decision layer. Three modes per transformer block per step:
   APPROXIMATE — PISA lightweight approximation (identity + scale)
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Optional
 
@@ -299,15 +299,16 @@ class DiffusionOptimizer:
         if self._teacache_state is not None and self.config.teacache is not None:
             cfg = self.config.teacache
             if self._motion_tracker is not None and frame is not None:
+                # Motion-adjusted threshold: build a throwaway copy of the
+                # user's TeaCacheConfig instead of mutating it in place.
+                # Exception-safe by construction — if teacache_should_compute
+                # raises, the user's config is untouched. (Fix from P9.0.)
                 self._motion_tracker.update(frame)
                 adjusted = self._motion_tracker.get_adjusted_threshold(cfg.rel_l1_thresh)
-                original = cfg.rel_l1_thresh
-                cfg.rel_l1_thresh = adjusted
-                result = teacache_should_compute(
-                    modulated_input, step_idx, cfg, self._teacache_state
+                cfg_adj = replace(cfg, rel_l1_thresh=adjusted)
+                return teacache_should_compute(
+                    modulated_input, step_idx, cfg_adj, self._teacache_state
                 )
-                cfg.rel_l1_thresh = original
-                return result
             return teacache_should_compute(
                 modulated_input, step_idx, cfg, self._teacache_state
             )
