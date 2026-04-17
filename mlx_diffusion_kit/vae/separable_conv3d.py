@@ -241,6 +241,7 @@ def build_separable_from_decomposition(
     in_channels: int,
     out_channels: int,
     kernel_size: tuple[int, int, int],
+    bias: Optional[mx.array] = None,
     spatial_stride: int | tuple[int, int] = 1,
     temporal_stride: int = 1,
     spatial_padding: int | tuple[int, int] = 0,
@@ -250,8 +251,14 @@ def build_separable_from_decomposition(
 
     Convenience helper that bridges Mode B (decompose) and Mode A
     (module). Sets the module's ``spatial.weight`` and ``temporal.weight``
-    to the supplied tensors. The module is returned with no bias on
-    the temporal conv (bias cannot be derived from a biasless Conv3d).
+    to the supplied tensors.
+
+    The factorized spatial stage never carries a bias (the R(2+1)D
+    factorization is a bilinear form on the weights alone). If the
+    original dense ``Conv3d`` had a bias, pass it via the ``bias``
+    parameter; it will be installed on the temporal stage, which is the
+    last stage of the forward pass and therefore where the bias lands
+    mathematically.
 
     Args:
         spatial_weight: Output of :func:`decompose_conv3d_to_separable`,
@@ -260,6 +267,11 @@ def build_separable_from_decomposition(
             shape ``(out, kT, mid)``.
         in_channels, out_channels, kernel_size: Must match the dimensions
             implied by the decomposed weights.
+        bias: Optional bias tensor of shape ``(out_channels,)`` copied
+            from the original dense ``Conv3d``. When provided, the
+            returned module has ``bias=True`` and carries this tensor on
+            the temporal conv. When ``None``, the returned module has
+            ``bias=False`` (no implicit zero bias is created).
         spatial_stride, temporal_stride, spatial_padding, temporal_padding:
             Passed through to :class:`SeparableConv3D`.
 
@@ -276,8 +288,10 @@ def build_separable_from_decomposition(
         temporal_stride=temporal_stride,
         spatial_padding=spatial_padding,
         temporal_padding=temporal_padding,
-        bias=False,
+        bias=bias is not None,
     )
     mod.spatial.weight = spatial_weight
     mod.temporal.weight = temporal_weight
+    if bias is not None:
+        mod.temporal.bias = bias
     return mod

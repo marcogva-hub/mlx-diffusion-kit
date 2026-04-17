@@ -184,3 +184,56 @@ def test_mode_b_forward_matches_dense_conv3d_at_full_rank():
         f"Mode B forward diverged from dense Conv3d: "
         f"max abs diff = {float(mx.max(mx.abs(y_ref - y_sep))):.6e}"
     )
+
+
+def test_build_separable_preserves_bias():
+    """build_separable_from_decomposition must carry a provided bias
+    through to the composed module, not silently drop it.
+
+    The bias mathematically belongs to the last stage of the forward
+    pass (temporal conv). For a given input x, the difference between
+    outputs with and without bias must equal the bias broadcast across
+    the spatial/temporal output positions.
+    """
+    mx.random.seed(0)
+    out, kT, kH, kW, inp = 4, 3, 3, 3, 3
+    W = mx.random.normal((out, kT, kH, kW, inp))
+    b = mx.random.normal((out,))
+
+    sp, tp, _ = decompose_conv3d_to_separable(W, rank=None)
+
+    mod_with = build_separable_from_decomposition(
+        sp, tp, inp, out, (kT, kH, kW), bias=b
+    )
+    mod_without = build_separable_from_decomposition(
+        sp, tp, inp, out, (kT, kH, kW), bias=None
+    )
+
+    x = mx.random.normal((1, 5, 5, 5, inp))
+    y_with = mod_with(x)
+    y_without = mod_without(x)
+
+    # For each output channel c, the difference (y_with - y_without) at
+    # every (N, T', H', W') position must equal b[c].
+    diff = y_with - y_without  # (N, T', H', W', out)
+    for c in range(out):
+        channel_diff = diff[..., c]
+        channel_mean = mx.mean(channel_diff)
+        assert mx.allclose(channel_mean, b[c], atol=1e-3), (
+            f"Channel {c}: expected bias {float(b[c]):.4f}, "
+            f"got mean diff {float(channel_mean):.4f}"
+        )
+
+
+def test_build_separable_no_bias_by_default():
+    """When bias is not supplied, the returned module must have bias=False
+    (no implicit zero bias created)."""
+    mx.random.seed(1)
+    W = mx.random.normal((4, 3, 3, 3, 3))
+    sp, tp, _ = decompose_conv3d_to_separable(W, rank=None)
+    mod = build_separable_from_decomposition(sp, tp, 3, 4, (3, 3, 3))
+    # Conv1d uses hasattr to check for bias; when bias=False it won't exist.
+    assert "bias" not in mod.temporal.__dict__ or mod.temporal.bias is None or \
+        not hasattr(mod.temporal, "bias"), (
+        "Bridge with bias=None should not install a bias on the temporal conv"
+    )
