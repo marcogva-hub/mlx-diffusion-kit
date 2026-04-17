@@ -28,11 +28,13 @@ from mlx_diffusion_kit.cache.deep_cache import (
     deepcache_store,
 )
 from mlx_diffusion_kit.cache.motion import MotionConfig, MotionTracker
-from mlx_diffusion_kit.cache.fbcache import (
+from mlx_diffusion_kit.cache.fb_cache import (
     FBCacheConfig,
     FBCacheState,
     create_fbcache_state,
-    fbcache_should_compute,
+    fbcache_reconstruct,
+    fbcache_reset,
+    fbcache_should_compute_remaining,
     fbcache_update,
 )
 from mlx_diffusion_kit.cache.multigranular import MultiGranularCache, MultiGranularConfig
@@ -257,23 +259,24 @@ class DiffusionOptimizer:
         self,
         step_idx: int,
         modulated_input: mx.array,
-        first_block_output: Optional[mx.array] = None,
         sigma_t: float = 0.5,
         frame: Optional[mx.array] = None,
     ) -> bool:
         """Check if the full model forward should run for this step.
 
-        Cascade priority (first configured wins):
+        Step-level cascade (first configured wins):
           1. TeaCache — best quality, requires calibrated coefficients
-          2. SpectralCache — frequency-domain detection, requires sigma_t
-          3. FBCache — zero-calibration fallback, requires first_block_output
+          2. SpectralCache — frequency-domain skip decision (requires sigma_t)
+
+        FBCache is NOT in this cascade: it decides at the transformer-block
+        boundary (skip blocks 2..N), not the whole-step boundary. Use
+        :meth:`should_compute_remaining_blocks` instead.
 
         Single-step models always return True.
 
         Args:
             step_idx: Current diffusion step.
             modulated_input: Timestep-modulated input tensor.
-            first_block_output: Output of first transformer block (for FBCache).
             sigma_t: Current noise level 0→1 (for SpectralCache).
             frame: Current video frame (for WorldCache motion adjustment).
 
@@ -289,7 +292,6 @@ class DiffusionOptimizer:
             if self._motion_tracker is not None and frame is not None:
                 self._motion_tracker.update(frame)
                 adjusted = self._motion_tracker.get_adjusted_threshold(cfg.rel_l1_thresh)
-                # Temporarily override threshold for this call
                 original = cfg.rel_l1_thresh
                 cfg.rel_l1_thresh = adjusted
                 result = teacache_should_compute(
@@ -307,44 +309,79 @@ class DiffusionOptimizer:
                 modulated_input, sigma_t, self.config.spectral_cache, self._spectral_cache_state
             )
 
-        # Priority 3: FBCache
-        if self._fbcache_state is not None and self.config.fbcache is not None:
-            if first_block_output is not None:
-                return fbcache_should_compute(
-                    first_block_output, self.config.fbcache, self._fbcache_state
-                )
-
         return True
+
+    # --- B2 FBCache (block-level, not step-level) ---
+
+    def should_compute_remaining_blocks(
+        self, first_block_output: mx.array, step_idx: int
+    ) -> bool:
+        """FBCache decision: should the caller run blocks 2..N this step?
+
+        Returns True if FBCache is not configured (caller must compute)
+        or if the change in first-block output is above threshold.
+        Returns False if the caller should reuse the cached residual via
+        :meth:`fbcache_reconstruct`.
+        """
+        if (
+            self.config.is_single_step
+            or self._fbcache_state is None
+            or self.config.fbcache is None
+        ):
+            return True
+        return fbcache_should_compute_remaining(
+            first_block_output, step_idx, self.config.fbcache, self._fbcache_state
+        )
+
+    def fbcache_update_residual(
+        self, fb_output: mx.array, residual: mx.array
+    ) -> None:
+        """Record fresh (first-block-output, residual) after running all blocks."""
+        if self._fbcache_state is not None:
+            fbcache_update(fb_output, residual, self._fbcache_state)
+
+    def fbcache_reconstruct_output(self, fb_output: mx.array) -> mx.array:
+        """Return fb_output + cached_residual. Requires prior update."""
+        if self._fbcache_state is None:
+            raise RuntimeError("FBCache is not configured on this optimizer.")
+        return fbcache_reconstruct(fb_output, self._fbcache_state)
 
     def update_step_cache(
         self,
         modulated_input: mx.array,
         output: mx.array,
         step_idx: int = 0,
-        first_block_output: Optional[mx.array] = None,
     ) -> None:
-        """Update all step-level caches after a computed step.
+        """Update step-level caches after a computed step.
+
+        Covers TeaCache, SpectralCache, and SmoothCache. FBCache is NOT
+        updated here because it caches a residual, not a full output;
+        use :meth:`fbcache_update_residual` from within the block-level
+        decision flow.
 
         Args:
             modulated_input: The input that was computed.
             output: The model's output.
             step_idx: Current step index (used by SmoothCache for interpolation).
-            first_block_output: First block output (for FBCache update).
         """
         if self._teacache_state is not None:
             teacache_update(modulated_input, output, self._teacache_state)
-        if self._fbcache_state is not None and first_block_output is not None:
-            fbcache_update(first_block_output, output, self._fbcache_state)
         if self._spectral_cache_state is not None:
             spectral_cache_update(modulated_input, output, self._spectral_cache_state)
         if self._smooth_cache_state is not None:
             smooth_cache_record(step_idx, output, self._smooth_cache_state)
 
     def get_cached_output(self, step_idx: int = 0) -> Optional[mx.array]:
-        """Retrieve output for a skipped step.
+        """Retrieve output for a skipped step (step-level caches only).
 
         If SmoothCache is configured, returns interpolated features.
-        Otherwise, returns the raw TeaCache cached residual.
+        Otherwise, returns the raw TeaCache cached residual, then
+        SpectralCache's cached output as a fallback.
+
+        Note: this method does NOT return FBCache's cached data.
+        FBCache stores a residual (not a full output), and reconstruction
+        requires the current first-block output — call
+        :meth:`fbcache_reconstruct_output(fb_output)` at the block level.
 
         Args:
             step_idx: The step being skipped (for SmoothCache interpolation).
@@ -361,8 +398,6 @@ class DiffusionOptimizer:
             return self._teacache_state.cached_residual
         if self._spectral_cache_state is not None:
             return self._spectral_cache_state.cached_output
-        if self._fbcache_state is not None:
-            return self._fbcache_state.cached_full_output
         return None
 
     def merge_tokens(self, tokens: mx.array) -> mx.array:

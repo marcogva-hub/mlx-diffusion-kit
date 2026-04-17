@@ -503,3 +503,31 @@
 ### Confidence
 - Overall: [HIGH]
 - Risks: model wrappers that previously called `should_compute_layer_deep(layer_idx, step_idx)` are incompatible. Since this API was undocumented/internal and not exported at top-level, no external breakage. Internal orchestrator tests did not use it.
+
+---
+## [2026-04-07 09:00] Phase P7.2: B2 FBCache rebuild
+
+### Plan
+- **Objective:** Replace the TeaCache-lite skip with block-level residual caching per the First-Block Cache algorithm. Rename `fbcache.py` → `fb_cache.py` to match the prompt's target filename.
+- **Files to modify:** `cache/fb_cache.py` (new), `cache/fbcache.py` (delete), `cache/__init__.py`, `orchestrator.py`; `tests/test_fb_cache.py` (new), `tests/test_fbcache.py` (delete).
+- **Dependencies impacted:** orchestrator cascade layout changes. FBCache is no longer in the `should_compute_step` cascade — it operates at a different granularity.
+
+### Changes made
+- `cache/fb_cache.py` — new file. Config: `rel_l1_thresh=0.1`, `start_step=0`, `end_step=None`, `max_consecutive_cached=5`, `enabled=True`. State: `prev_fb_output`, `cached_residual` (= `full_output - fb_output`), `step_counter`, `consecutive_cached`. Functions: `create_fbcache_state`, `fbcache_should_compute_remaining` (decision), `fbcache_update` (stores residual), `fbcache_reconstruct` (returns `fb + cached_residual`), `fbcache_reset`. [HIGH]
+- `cache/fbcache.py` — deleted. [HIGH]
+- `cache/__init__.py` — import path updated; `fbcache_should_compute` removed from __all__, replaced with `fbcache_should_compute_remaining`, `fbcache_reconstruct`, `fbcache_reset`. [HIGH]
+- `orchestrator.py` — FBCache removed from the `should_compute_step` step-level cascade (it operates at block boundary, not step boundary). New methods: `should_compute_remaining_blocks`, `fbcache_update_residual`, `fbcache_reconstruct_output`. `update_step_cache` no longer takes `first_block_output`, no longer updates FBCache state. `get_cached_output` no longer returns FBCache data (would be incorrect: FBCache stores a residual, not a full output). [HIGH]
+- `tests/test_fb_cache.py` — 11 new tests: first-step compute, identical-skip, divergent-compute, **reconstruction identity** (`reconstruct(fb) = fb + cached_residual`), **fb dependence** (reconstruction uses *current* fb, not cached), max_consecutive ceiling, start_step window, end_step window, disabled passthrough, reconstruct-without-cache raises, reset. [HIGH]
+- `tests/test_fbcache.py` — deleted (superseded). [HIGH]
+
+### Dependency & regression check
+- grep for `fbcache\|FBCache\|first_block_output` in tests/test_orchestrator.py, tests/test_integration.py → no matches. No callers to update.
+- Full test suite: 255 pass (previously 249 — net +6 because the new test file has 11 tests vs the prior 5). No regressions.
+
+### Tech cost assessment
+- Compute: one rel_l1 per decision (O(n)). One subtract for residual store. One add for reconstruction. Negligible vs model forward.
+- Memory: `prev_fb_output` (first-block shape) + `cached_residual` (full-output shape) = modest. Not 2x full-output as the prior broken impl would suggest.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: model wrappers that previously received "skip everything" from FBCache now get "skip remaining blocks" semantics. If any user relied on the prior (incorrect) behavior, their code breaks. Acceptable because the prior behavior was wrong per the paper.

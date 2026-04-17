@@ -20,11 +20,13 @@ from mlx_diffusion_kit.cache.layer_redundancy import (
     analyze_layer_redundancy,
     select_cacheable_layers,
 )
-from mlx_diffusion_kit.cache.fbcache import (
+from mlx_diffusion_kit.cache.fb_cache import (
     FBCacheConfig,
     FBCacheState,
     create_fbcache_state,
-    fbcache_should_compute,
+    fbcache_reconstruct,
+    fbcache_reset,
+    fbcache_should_compute_remaining,
     fbcache_update,
 )
 from mlx_diffusion_kit.cache.multigranular import (
@@ -86,7 +88,9 @@ __all__ = [
     "FBCacheConfig",
     "FBCacheState",
     "create_fbcache_state",
-    "fbcache_should_compute",
+    "fbcache_reconstruct",
+    "fbcache_reset",
+    "fbcache_should_compute_remaining",
     "fbcache_update",
     # B3 SpectralCache
     "SpectralCacheConfig",
