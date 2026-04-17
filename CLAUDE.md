@@ -171,9 +171,9 @@ mlx_diffusion_kit/
 
 ## Current implementation status
 
-- **46 public exports** in `__init__.py`
-- **21 components** (9 STABLE, 9 BETA, 2 EXPERIMENTAL, 3 STUB)
-- **245+ tests** across 25 test files
+- **89 public exports** in `__init__.py`
+- **23 components** (9 STABLE, 11 BETA, 1 EXPERIMENTAL, 2 STUB)
+- **276+ tests** across 27 test files
 - **2 functional scripts** (calibrate_teacache.py, analyze_layer_redundancy.py)
 
 ## Output constraint — MANDATORY

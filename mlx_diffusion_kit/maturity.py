@@ -23,24 +23,24 @@ class Maturity(Enum):
 
 COMPONENT_MATURITY: dict[str, Maturity] = {
     "B1_TeaCache": Maturity.STABLE,
-    "B2_FBCache": Maturity.BETA,
-    "B3_SpectralCache": Maturity.BETA,
+    "B2_FBCache": Maturity.BETA,  # P7.2 rebuild: block-level residual caching per paper
+    "B3_SpectralCache": Maturity.BETA,  # P7.4 rebuild: real freq-domain LF/HF caching + SeaCache variant
     "B4_SmoothCache": Maturity.STABLE,
-    "B5_DeepCache": Maturity.BETA,
+    "B5_DeepCache": Maturity.BETA,  # P7.1 rebuild: UNet deep-branch caching per paper
     "B6_MultiGranular": Maturity.BETA,
-    "B7_ToCa": Maturity.BETA,
+    "B7_ToCa": Maturity.BETA,  # P7.3 rebuild: per-layer velocity-based token caching
     "B8_ToMe": Maturity.STABLE,
     "B8_ToPi": Maturity.BETA,
     "B9_DiffSparse": Maturity.STUB,
     "B10_DDiT": Maturity.BETA,
     "B11_TGATE": Maturity.STABLE,
-    "B12_DiTFastAttn": Maturity.EXPERIMENTAL,
+    "B12_DiTFastAttn": Maturity.BETA,  # P7.5 rebuild: 4 strategies (FULL/WINDOW/SHARE/RESIDUAL), per-layer policy
     "B13_FreeU": Maturity.STABLE,
     "B14_DPMSolver": Maturity.STABLE,
     "B14_AdaptiveStep": Maturity.BETA,
     "B15_EmbedCache": Maturity.STABLE,
     "B17_WaveletVAE": Maturity.STABLE,
-    "B18_SeparableConv3D": Maturity.STUB,
+    "B18_SeparableConv3D": Maturity.BETA,  # P7.6: Mode A module + Mode B SVD decomposition
     "B19_DecoderDistill": Maturity.STUB,
     "B22_EncoderSharing": Maturity.BETA,
     "B23_Orchestrator": Maturity.STABLE,

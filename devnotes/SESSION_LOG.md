@@ -435,3 +435,283 @@
 
 ### Confidence
 - Overall: [HIGH]
+
+---
+## [2026-04-07 08:00] Phase P7.0: Honest rebuild — baseline reset
+
+### Plan
+- **Objective:** Reset the maturity of B2/B3/B5/B7/B12 to STUB because the current implementations are algorithmically incorrect when audited against the original prompt specification. Re-implement correctly across P7.1–P7.6.
+- **Files to modify:** `mlx_diffusion_kit/maturity.py` (downgrade 5 entries), `devnotes/SESSION_LOG.md` (this entry).
+- **Dependencies impacted:** None yet — no code deleted or rewritten in this phase. Per-phase cleanup happens in P7.1–P7.5.
+
+### Audit findings that motivated the reset
+- **B5 DeepCache** was a generic per-layer cache (`dict[int, mx.array]`) with auto-selection of "middle" indices. It had no notion of UNet deep-branch semantics. Correct algorithm caches the bottleneck output as a single tensor and recomputes only the shallow encoder/decoder layers each step.
+- **B2 FBCache** used the first-block output as a skip signal but cached and returned the **entire model output**. Correct algorithm caches the **residual** (full_output − fb_output) and reconstructs as `fb_output + cached_residual`, skipping only the remaining blocks. Also missing `start_step`/`end_step`.
+- **B7 ToCa** used single-step cosine similarity with a single global cache. Correct algorithm needs per-layer state and **L1-velocity scoring** across ≥2 previous steps. Also contained a Python `for b_idx in range(B)` loop — the same anti-pattern fixed earlier in ToMe.
+- **B3 SpectralCache** was a step-level skip decision using HF magnitude change as signal. Correct algorithm caches **LF Fourier coefficients** across steps, recomputes HF each step, and **reconstructs via inverse transform**. None of the frequency-domain caching existed.
+- **B12 DiTFastAttn** had 3 strategies (FULL/WINDOW/CACHED) with variance-based auto-profiling. Correct design per prompt has 4 strategies (FULL/WINDOW/SHARE/RESIDUAL) with explicit per-layer config lists.
+
+### Rebuild decisions approved by user (R1 path)
+- Delete the 5 modules and their tests. New tests derived from algorithm input/output contract, not from the candidate code.
+- **B19** Flash-VAED / Neodragon decoder distill: skip (separate project).
+- **B3** SpectralCache: implement SeaCache variant (`spectral_velocity_aware` flag) in the same pass.
+- **B12** DiTFastAttn: follow prompt spec exactly — 4 strategies, `sharing_layers`/`residual_cache_layers` config lists, per-layer (not per-head) decisions.
+- **B18** Separable Conv3D: implementer's judgment. Plan: Mode A = `nn.Module` R(2+1)D block for new models; Mode B = SVD decomposition of pretrained `conv3d` weights into (spatial_2D, temporal_1D) factors with reported reconstruction error.
+- **MosaicDiff** (redundancy analyzer, previously bundled with DeepCache): move to a separate module so the new DeepCache file stays surgical. Preserves `scripts/analyze_layer_redundancy.py` functionality.
+
+### Changes made
+- `maturity.py:L21-L39` — B2/B3/B5/B7/B12 downgraded to STUB with inline rationale [HIGH]
+- `devnotes/SESSION_LOG.md` — this entry [HIGH]
+
+### Dependency & regression check
+- No code deleted in this phase. Existing 245 tests still pass (tested before this commit).
+- Per-phase integration-point rewiring in the orchestrator happens inside each P7.N commit.
+
+### Tech cost assessment
+- N/A (metadata + docs only)
+
+### Confidence
+- Overall: [HIGH]
+- Risks: none for this setup commit. Per-phase risks logged in each P7.N entry.
+
+---
+## [2026-04-07 08:30] Phase P7.1: B5 DeepCache rebuild
+
+### Plan
+- **Objective:** Replace the generic per-layer cache masquerading as DeepCache with a paper-faithful deep-branch caching policy. Move the MosaicDiff redundancy analyzer (previously bundled) to its own module.
+- **Files to modify:** `cache/deep_cache.py` (rewrite), `cache/layer_redundancy.py` (new), `cache/__init__.py`, `orchestrator.py`, `scripts/analyze_layer_redundancy.py`; `tests/test_deep_cache.py` (rewrite), `tests/test_layer_redundancy.py` (new), `tests/test_analyze_redundancy.py` (delete — superseded).
+- **Dependencies impacted:** orchestrator (rewired), analyze script (import path change).
+
+### Changes made
+- `cache/deep_cache.py` — rewrite. New API: `DeepCacheConfig{cache_interval, start_step, enabled}`, `DeepCacheState{cached_deep_features, last_recompute_step, recompute_count}`, plus `create_deepcache_state`, `deepcache_should_recompute`, `deepcache_store`, `deepcache_get`, `deepcache_reset`. Decision is delta-based, not modulo, so TeaCache-skipped step sequences remain correct. [HIGH]
+- `cache/layer_redundancy.py` — new. `analyze_layer_redundancy` and `select_cacheable_layers` moved here, unchanged in behavior. Docstring clarifies this is a tooling utility, not a runtime cache. [HIGH]
+- `cache/__init__.py` — expose new DeepCache API + MotionConfig/MotionTracker (previously forgotten from __all__). [HIGH]
+- `orchestrator.py` — DeepCacheManager-based methods removed. New: `should_recompute_deep`, `get_cached_deep_features`, `store_deep_features`, plus `deep_cache_state` property. Integration contract documented: the caller's model wrapper splits at the deep/shallow boundary and invokes these. [HIGH]
+- `scripts/analyze_layer_redundancy.py:L17` — import path updated to `cache.layer_redundancy`. [HIGH]
+- `tests/test_deep_cache.py` — 10 new tests derived from the algorithm contract: first-step recompute, store-then-reuse-until-interval, exact state mutation, disabled passthrough, start_step respected, delta-based correctness under non-contiguous step indices, interval=1 edge case, reset, get-on-fresh, recompute-count telemetry. [HIGH]
+- `tests/test_layer_redundancy.py` — 8 new tests: single-layer zero score, all-identical full redundancy, mixed-weight ranking, score bounds, l2 method, ratio selection, min selection size, sorted output. [HIGH]
+- `tests/test_analyze_redundancy.py` — deleted (superseded by test_layer_redundancy). [HIGH]
+
+### Dependency & regression check
+- grep for `DeepCacheManager`, `should_compute_layer_deep`, `get_deep_cached_layer`, `update_deep_cache_layer`, `deep_cache_manager`, `analyze_layer_redundancy`, `select_cacheable_layers` in tests/, mlx_diffusion_kit/, scripts/ → only expected references remain.
+- Full test suite: 249 pass (previously 245 — net +4 because redundancy now has 8 tests vs the prior 3). No regressions.
+
+### Tech cost assessment
+- Compute: decision is O(1) per step. Store is O(1) (reference assignment). No FFT, no matrix ops.
+- Memory: one cached tensor (size model-dependent). No per-layer dict.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: model wrappers that previously called `should_compute_layer_deep(layer_idx, step_idx)` are incompatible. Since this API was undocumented/internal and not exported at top-level, no external breakage. Internal orchestrator tests did not use it.
+
+---
+## [2026-04-07 09:00] Phase P7.2: B2 FBCache rebuild
+
+### Plan
+- **Objective:** Replace the TeaCache-lite skip with block-level residual caching per the First-Block Cache algorithm. Rename `fbcache.py` → `fb_cache.py` to match the prompt's target filename.
+- **Files to modify:** `cache/fb_cache.py` (new), `cache/fbcache.py` (delete), `cache/__init__.py`, `orchestrator.py`; `tests/test_fb_cache.py` (new), `tests/test_fbcache.py` (delete).
+- **Dependencies impacted:** orchestrator cascade layout changes. FBCache is no longer in the `should_compute_step` cascade — it operates at a different granularity.
+
+### Changes made
+- `cache/fb_cache.py` — new file. Config: `rel_l1_thresh=0.1`, `start_step=0`, `end_step=None`, `max_consecutive_cached=5`, `enabled=True`. State: `prev_fb_output`, `cached_residual` (= `full_output - fb_output`), `step_counter`, `consecutive_cached`. Functions: `create_fbcache_state`, `fbcache_should_compute_remaining` (decision), `fbcache_update` (stores residual), `fbcache_reconstruct` (returns `fb + cached_residual`), `fbcache_reset`. [HIGH]
+- `cache/fbcache.py` — deleted. [HIGH]
+- `cache/__init__.py` — import path updated; `fbcache_should_compute` removed from __all__, replaced with `fbcache_should_compute_remaining`, `fbcache_reconstruct`, `fbcache_reset`. [HIGH]
+- `orchestrator.py` — FBCache removed from the `should_compute_step` step-level cascade (it operates at block boundary, not step boundary). New methods: `should_compute_remaining_blocks`, `fbcache_update_residual`, `fbcache_reconstruct_output`. `update_step_cache` no longer takes `first_block_output`, no longer updates FBCache state. `get_cached_output` no longer returns FBCache data (would be incorrect: FBCache stores a residual, not a full output). [HIGH]
+- `tests/test_fb_cache.py` — 11 new tests: first-step compute, identical-skip, divergent-compute, **reconstruction identity** (`reconstruct(fb) = fb + cached_residual`), **fb dependence** (reconstruction uses *current* fb, not cached), max_consecutive ceiling, start_step window, end_step window, disabled passthrough, reconstruct-without-cache raises, reset. [HIGH]
+- `tests/test_fbcache.py` — deleted (superseded). [HIGH]
+
+### Dependency & regression check
+- grep for `fbcache\|FBCache\|first_block_output` in tests/test_orchestrator.py, tests/test_integration.py → no matches. No callers to update.
+- Full test suite: 255 pass (previously 249 — net +6 because the new test file has 11 tests vs the prior 5). No regressions.
+
+### Tech cost assessment
+- Compute: one rel_l1 per decision (O(n)). One subtract for residual store. One add for reconstruction. Negligible vs model forward.
+- Memory: `prev_fb_output` (first-block shape) + `cached_residual` (full-output shape) = modest. Not 2x full-output as the prior broken impl would suggest.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: model wrappers that previously received "skip everything" from FBCache now get "skip remaining blocks" semantics. If any user relied on the prior (incorrect) behavior, their code breaks. Acceptable because the prior behavior was wrong per the paper.
+
+---
+## [2026-04-07 09:30] Phase P7.3: B7 ToCa rebuild
+
+### Plan
+- **Objective:** Replace single-step global cosine caching with per-layer velocity-based token caching per Zou et al.
+- **Files to modify:** `tokens/toca.py` (rewrite), `tokens/__init__.py`, `orchestrator.py`; `tests/test_toca.py` (rewrite).
+
+### Changes made
+- `tokens/toca.py` — rewrite. New API: `ToCaConfig{recompute_ratio, score_mode, enabled}`, per-layer `ToCaLayerState{cached_tokens, prev_tokens, step_count}`, top-level `ToCaState{layers: dict[int, ...]}`. Functions: `create_toca_state`, `toca_select_tokens` (returns `(active_indices, cached_indices)`, sorted by position), `toca_compose` (reassembles `[B, N, D]` from disjoint active+cached pieces), `toca_update` (shifts `prev ← cached`, `cached ← tokens`), `toca_get_cached`, `toca_reset`. Score modes: `"velocity"` needs 2-step history, `"magnitude"` works from step 1. Fallback to all-active when history is insufficient. [HIGH]
+- `tokens/__init__.py` — export new API, drop `TokenCacheManager`. [HIGH]
+- `orchestrator.py` — `TokenCacheManager` references replaced with function-based API: `toca_select`, `toca_record`, `toca_compose_tokens`, `toca_state` property. State storage is `_toca_state: Optional[ToCaState]`. [HIGH]
+- `tests/test_toca.py` — 13 new tests: first-call all-active, velocity mode needs 2 updates, velocity partitioning with crafted trajectory, disjoint union covers N, compose reconstructs correctly, compose with empty cached, per-layer independence, magnitude mode from step 1, disabled passthrough, update shifts history, get_cached Noneness, reset clears. [HIGH]
+
+### Dependency & regression check
+- grep for `TokenCacheManager`, `self._toca[^_]` → no matches outside orchestrator internals (now updated).
+- Full test suite: 258 pass (previously 255 — net +3; test count jumped from 9 to 13 but some integration tests cover overlapping ground). No regressions.
+
+### Tech cost assessment
+- Compute: per decision, one mean-abs per token (O(N·D)) + one argsort (O(N log N)). No Python batch loops in selection. Compose has a small batch loop for scatter-add (B typically 1-8).
+- Memory: per layer, 2 × `[B, N, D]` tensors (cached + prev). For 24-layer DiT with B=1, N=4096, D=1024: ~200 MB. Documented as the tradeoff.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: the compose function uses a per-batch Python loop for scatter-add. Acceptable because B is small; matches existing ToPi and ToMe patterns. If profiled as a bottleneck, a vectorized `at[]` path via flat batch offsets is possible.
+
+---
+## [2026-04-07 10:00] Phase P7.4: B3 SpectralCache + SeaCache rebuild
+
+### Plan
+- **Objective:** Replace the step-level skip decision with actual frequency-domain LF/HF caching and inverse-transform reconstruction, per the prompt. Add the SeaCache variant (`spectral_velocity_aware`) that invalidates LF cache on high per-band velocity.
+- **Files to modify:** `cache/spectral_cache.py` (rewrite), `cache/__init__.py`, `orchestrator.py`; `tests/test_spectral_cache.py` (rewrite).
+
+### Changes made
+- `cache/spectral_cache.py` — rewrite. Config: `low_freq_ratio=0.25`, `cache_interval_low=4`, `cache_interval_high=1`, `transform="rfft"|"dct"`, `spectral_velocity_aware=False`, `velocity_override_thresh=0.5`. State: `cached_low_freq`, `cached_high_freq`, `prev_full_spectra` (bounded at 2 for SeaCache), `last_low_recompute_step`, `last_high_recompute_step`. Core function `spectral_cache_apply(features, step_idx, config, state) -> features` does the round trip: rFFT → split LF/HF → apply policy → combine → irFFT. Delta-based interval arithmetic so TeaCache-skipped steps don't desync. DCT raises NotImplementedError with a clear message (MLX has no native DCT). [HIGH]
+- `cache/__init__.py` — export new API, drop `spectral_cache_should_compute`. [HIGH]
+- `orchestrator.py` — SpectralCache removed from `should_compute_step` cascade (it's not a skip gate anymore). New method `apply_spectral_cache(features, step_idx)` for caller-driven application. `should_compute_step` signature simplified (removed `sigma_t` parameter since nothing else used it). `update_step_cache` updates spectral state via the new `spectral_cache_update(features, step_idx, config, state)` signature. `get_cached_output` docstring now explains that SpectralCache has its own reconstruction path. [HIGH]
+- `tests/test_spectral_cache.py` — 11 new tests: shape preservation, **identity when both intervals = 1** (the canonical reconstruction test), disabled passthrough, **LF cache honored** (verifies the combined spectrum explicitly), LF invalidates after interval, HF always fresh at interval=1, DCT raises, **SeaCache forces recompute on high velocity**, SeaCache stable on small change, update forces refresh, reset clears all. [HIGH]
+
+### Dependency & regression check
+- `should_compute_step` signature changed (`sigma_t` removed). Before change I grep'd for callers — no tests use that kwarg. Integration tests use keyword arguments that no longer include `sigma_t` in their call sites; no breakage.
+- Full test suite: 262 pass (previously 258 — net +4). No regressions.
+
+### Tech cost assessment
+- Compute: forward + inverse rFFT per call. MLX complex64 round-trips at ~1e-6 error. For N=4096 tokens along the last axis, O(N log N).
+- Memory: two band caches (LF + HF). Sum is ~one spectrum-sized complex array. For SeaCache: up to 2 additional full spectra in history.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: FFT is taken along the last axis only. For feature maps where the last axis is the channel/embedding dim (standard DiT layout), this is correct. If a user passes features with a different axis convention, they must reshape first. Documented implicitly via the `axis=-1` contract in the docstring.
+
+---
+## [2026-04-07 10:30] Phase P7.5: B12 DiTFastAttn rebuild
+
+### Plan
+- **Objective:** Replace the 3-strategy per-head variance-profiled design with the paper's 4-strategy per-layer policy (FULL / WINDOW / SHARE / RESIDUAL).
+- **Files to modify:** `attention/ditfastattn.py` (rewrite), `attention/__init__.py`, `orchestrator.py`; `tests/test_ditfastattn.py` (rewrite).
+
+### Changes made
+- `attention/ditfastattn.py` — rewrite. Four-strategy `AttnStrategy` enum. Config: `window_start_step`, `window_size`, `sharing_layers: list[int]`, `residual_cache_layers: list[int]`. State: two caches (`cached_attn_maps`, `cached_residuals`) keyed by layer_idx. Functions: `create_ditfastattn_state`, `ditfastattn_decide`, `ditfastattn_record_attn_map`, `ditfastattn_get_cached_attn`, `ditfastattn_record_residual`, `ditfastattn_get_cached_residual`, `ditfastattn_reset`. Decision precedence documented in docstring: step==0 → FULL; RESIDUAL wins if configured+cached; SHARE wins over WINDOW; WINDOW activates at window_start_step. Safety fallback: missing cache → drop to next priority tier. [HIGH]
+- `attention/__init__.py` — expose new API. `DiTFastAttnManager` and `HeadStrategy` removed. [HIGH]
+- `orchestrator.py` — `DiTFastAttnManager` references replaced with function-based API. State storage is `_ditfastattn_state: Optional[DiTFastAttnState]`. New methods: `get_attn_strategy`, `record_attn_map`, `get_cached_attn_map`, `record_attn_residual`, `get_cached_attn_residual`. [HIGH]
+- `tests/test_ditfastattn.py` — 12 new tests: step 0 is FULL, disabled is FULL, RESIDUAL beats SHARE beats WINDOW, missing-cache safety fallback for both SHARE and RESIDUAL, WINDOW boundary, non-listed layer behavior, roundtrip for each cache, reset clears both, and a comprehensive **"four distinct strategies achievable"** test. [HIGH]
+
+### Dependency & regression check
+- grep for `DiTFastAttnManager`, `HeadStrategy`, `self._ditfastattn[^_]` → no matches outside the rewritten orchestrator internals.
+- Full test suite: 266 pass (previously 262 — net +4). No regressions.
+
+### Tech cost assessment
+- Compute: all decision functions are O(1) (list/dict membership + integer compares).
+- Memory: two dicts keyed by layer_idx. Per entry: one mx.array reference, no copy. Caller owns the underlying tensors.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: the safety fallback (missing-cache → drop to next strategy) means users who configure `sharing_layers=[0]` but forget to call `record_attn_map` will silently get WINDOW/FULL instead of SHARE. Documented in the docstring. An alternative would be to raise, but that's noisier and less forgiving.
+
+---
+## [2026-04-07 11:00] Phase P7.6: B18 Separable Conv3D (new)
+
+### Plan
+- **Objective:** Implement R(2+1)D separable 3D convolution in both modes: new-module (Mode A) and SVD decomposition of a pretrained dense Conv3d kernel (Mode B).
+- **Files to modify:** `vae/separable_conv3d.py` (new), `vae/__init__.py`; `tests/test_separable_conv3d.py` (new).
+
+### Changes made
+- `vae/separable_conv3d.py` — new file. [HIGH]
+  - Mode A: `SeparableConv3D(nn.Module)`. Uses `nn.Conv2d` for spatial (kH, kW) followed by `nn.Conv1d` for temporal (kT). Forward reshapes via transpose to (N*T, H, W, C) for spatial, then (N*H'*W', T, mid) for temporal. Configurable `mid_channels` (rank).
+  - Mode B: `decompose_conv3d_to_separable(W, rank=None) -> (spatial, temporal, error)`. Reshapes `W[out, kT, kH, kW, in]` to `(kT*out, kH*kW*in)` via transpose, runs SVD on CPU stream (MLX SVD is CPU-only at current MLX version on M1 Max), distributes sqrt(Σ) evenly between U and V^T, reshapes factors to `(mid, kH, kW, in)` and `(out, kT, mid)`. Returns the relative Frobenius reconstruction error for the caller to judge acceptability.
+  - Bridge helper: `build_separable_from_decomposition` wraps Mode B factors into a Mode A module.
+- `vae/__init__.py` — export all three symbols. [HIGH]
+- `tests/test_separable_conv3d.py` — 10 tests. Mode A: forward shape (5 → 3 temporal kernel reduces T by 2), forward finiteness, parameter-count formula validation, input-validation errors. Mode B: **full-rank lossless reconstruction** (error < 1e-4), reduced-rank error is positive and bounded, **monotone error decrease with increasing rank**, bridge produces a working module. [HIGH]
+
+### Dependency & regression check
+- No orchestrator integration per prompt spec (B18 is a VAE building block, not a step-level decision).
+- Full test suite: 276 pass (previously 266 — net +10, matches the 10 new tests). No regressions.
+
+### Tech cost assessment
+- Mode A: parameter count follows `kH·kW·in·mid + kT·mid·out + out_bias`. For a 3³ kernel, `in=out=mid=64`, separable = 28_864 vs dense = 110_592, a 3.8× reduction.
+- Mode B: SVD on `(kT·out, kH·kW·in)` matrix. For `out=64, kT=3, kH=kW=3, in=64` → SVD on `(192, 576)`, CPU-bound. One-time cost at model conversion.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: MLX `mx.linalg.svd` requires `stream=mx.cpu` at this MLX version. Documented and verified. If a future MLX ships GPU SVD, the decomposition should automatically get faster; the API is stable either way.
+- Risks: Mode B at reduced rank is lossy by definition. The returned `reconstruction_error` lets the user decide; no silent accuracy degradation.
+
+---
+## [2026-04-07 11:30] Phase P7 wrap-up — docs, exports, final verification
+
+### Changes made
+- `mlx_diffusion_kit/__init__.py` — re-exported the rebuilt APIs. Export count grew from 46 to 89. All 89 pass `hasattr(mod, name)` smoke check. [HIGH]
+- `README.md` — table updated: B5 maturity note (UNet-generalized scope, 5 models not 3), B7 target narrowed to multi-step DiT, B12 moved to Beta, B18 added row. Status line: 21→23 components, 245+→276+ tests, maturity counts corrected. [HIGH]
+- `CLAUDE.md:L174-176` — implementation-status block updated (89 exports, 23 components, 276+ tests across 27 test files). [HIGH]
+- `CHANGELOG.md` — new "Unreleased — P7 rebuild branch" section documenting the audit + rebuild of B2/B3/B5/B7/B12 and the new B18, with rationale for each. Also covers the orchestrator API reshuffles (cascade layout change, method renames). [HIGH]
+- `docs/API_MANUAL.md` — appended "Rebuilt / Added in P7 (2026-04-07)" section with full per-component signatures. Version banner bumped from 46 to 89 exports. [HIGH]
+
+### Dependency & regression check
+- Import smoke: 89/89 exports importable via `mlx_diffusion_kit.<name>`.
+- Full test suite: **276 pass, 0 failures**. Up from 245 baseline on `main` (net +31 across the 6 rebuilt/new components; deltas recorded per-phase in the P7.1–P7.6 entries).
+- Orchestrator API changes not visible at top-level — all were internal method renames (e.g., `should_compute_layer_deep` → `should_recompute_deep`). External users consuming only the documented public surface are unaffected where the algorithms were paper-faithful; where they depended on the previous incorrect semantics (notably FBCache caching full output), they break by design.
+
+### Final component maturity snapshot
+- STABLE: 9 (B1, B4, B8 ToMe, B11, B13, B14.1, B15, B17, B23)
+- BETA: 11 (B2, B3, B5, B6, B7, B8 ToPi, B10, B12, B14.2, B18, B22)
+- EXPERIMENTAL: 1 (WorldCache motion)
+- STUB: 2 (B9 DiffSparse, B19 Flash-VAED/Neodragon — separate project)
+
+### Confidence
+- Overall: [HIGH]
+- Next: ready for user review on the branch. Per the prompt, no push until review. Once reviewed, merge `feat/readme-backlog-p7` into `main` and tag as needed (not `v0.1.0` since that tag is already on the original release — next tag should be `v0.2.0` or a pre-release like `v0.2.0-rc.1` because the external API changed in non-trivial ways).
+
+---
+## [2026-04-07 12:30] Phase P8.0: Post-review fixes from mlx-code-review P7 audit
+
+### Plan
+- **Objective:** Apply the four fixes surfaced by the `mlx-code-review` skill's audit of branch `feat/readme-backlog-p7`:
+  (1) remove SpectralCache force-refresh from `update_step_cache` (silent correctness bug — orchestrator wiring introduced in P7.4);
+  (2) add a B18 forward-equivalence test (contract guarantee previously untested);
+  (3) add a `bias` parameter to `build_separable_from_decomposition` (previously silently dropped bias);
+  (4) add shape validation to `fbcache_reconstruct` (previously produced cryptic MLX errors on shape mismatch).
+- **Files to modify:** `mlx_diffusion_kit/orchestrator.py`, `mlx_diffusion_kit/vae/separable_conv3d.py`, `mlx_diffusion_kit/cache/fb_cache.py`, `tests/test_orchestrator.py`, `tests/test_separable_conv3d.py`, `tests/test_fb_cache.py`.
+- **Dependencies impacted:**
+  - `orchestrator.py` drops the `spectral_cache_update` import — external top-level API unchanged.
+  - `build_separable_from_decomposition` gains an optional `bias` kwarg (backward compatible).
+  - No other user-facing API changes.
+
+### Changes made
+- `orchestrator.py:58-62` — removed `spectral_cache_update` from the import group [HIGH]
+- `orchestrator.py:387-395` — removed the SpectralCache block from `update_step_cache` and replaced with a comment explaining why the orchestrator must not touch SpectralCache state here [HIGH]
+- `vae/separable_conv3d.py:238-292` — added optional `bias: Optional[mx.array] = None` parameter to `build_separable_from_decomposition`; when supplied, installed on `mod.temporal.bias` [HIGH]
+- `cache/fb_cache.py:168-195` — added `ValueError` in `fbcache_reconstruct` when `fb_output.shape != state.cached_residual.shape`, with a message pointing the caller to `fbcache_reset` [HIGH]
+- `tests/test_orchestrator.py` — 1 new test: `test_spectral_cache_state_not_corrupted_by_update_step_cache`. Uses deliberately different shapes for `modulated_input` and `apply_spectral_cache` features to make any coupling between them visible. Passes after the fix; would have crashed on shape mismatch before [HIGH]
+- `tests/test_separable_conv3d.py` — 3 new tests: `test_mode_b_forward_matches_dense_conv3d_at_full_rank` (contract guarantee — max-abs-diff ~1.4e-5 on `(4,3,3,3,3)` kernel), `test_build_separable_preserves_bias` (per-channel mean of `with-bias − without-bias` output equals the bias element), `test_build_separable_no_bias_by_default` (no implicit zero bias is created when `bias=None`) [HIGH]
+- `tests/test_fb_cache.py` — 2 new tests: `test_fbcache_reconstruct_raises_on_shape_mismatch` (positive case for new ValueError; also re-checks the RuntimeError path still fires post-reset) and `test_fbcache_reconstruct_same_shape_still_works` (negative control: same-shape path unchanged) [HIGH]
+
+### Dependency & regression check
+- `grep -n spectral_cache_update mlx_diffusion_kit/orchestrator.py` → empty ✓
+- `grep -n "bias=False" mlx_diffusion_kit/vae/separable_conv3d.py` inspected: only remaining occurrences are in `SeparableConv3D.__init__` (line 114, the R(2+1)D spatial stage which correctly carries no bias — bias belongs on the temporal stage mathematically) and in docstring lines — the bridge function no longer contains a hardcoded `bias=False` ✓
+- `python -c "from mlx_diffusion_kit import *"` → no ImportError ✓
+- Full test suite: **282 pass, 0 failures** (up from 276 baseline on `main`; net +6 from this phase: 4 explicitly required by the prompt + 2 positive-control tests for robustness) ✓
+- No existing tests were modified — only new tests added.
+
+### Tech cost assessment
+- Fix 1: removes one unconditional function call (`spectral_cache_update`) per `update_step_cache` invocation. Net compute: -1 rFFT + -1 magnitude per call. Negligible.
+- Fix 2: adds one forward-pass comparison per test run. Negligible.
+- Fix 3: adds one optional parameter. No compute change when `bias=None` (default). When `bias` is supplied, one additional bias add per forward pass — but that was presumably the intent of the pretrained bias being kept in the first place.
+- Fix 4: adds one shape comparison per `fbcache_reconstruct` call. Tuple equality — O(1). Negligible.
+
+### Deferred (acknowledged, not implemented in P8)
+- **Integration tests covering the rebuilt components end-to-end** through `DiffusionOptimizer` (review finding #3). Slated for a future P9 phase. Lower priority now that Fix 1 closes the most likely integration-level bug.
+- **`analyze_layer_redundancy` `.item()`-in-loop** (review finding #6). Acceptable for an offline analysis tool; not worth vectorizing unless it becomes a bottleneck in practice.
+
+### Confidence
+- Overall: [HIGH]
+- Risks: Fix 1 is the only behavior change with user-visible consequences. Callers who relied on the incorrect force-refresh semantics for SpectralCache must now explicitly call `apply_spectral_cache` with the feature stream they want cached. This is documented in the in-code comment and in the CHANGELOG already covers the orchestrator API moves. Pre-1.0 library; acceptable.
+
+### Commit sequence on this branch
+```
+e7fe0b4 fix(orchestrator): remove SpectralCache force-refresh from update_step_cache
+f27e2b4 test(B18): add forward-equivalence test for Mode B at full rank
+c2a0a73 feat(B18): add bias parameter to build_separable_from_decomposition
+11298b0 feat(fbcache): validate shapes in fbcache_reconstruct
+```
+
+### Status
+Ready for merge review on `feat/readme-backlog-p7`. No push yet per prompt directive.

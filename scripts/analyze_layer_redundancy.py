@@ -14,7 +14,7 @@ from pathlib import Path
 
 import mlx.core as mx
 
-from mlx_diffusion_kit.cache.deep_cache import analyze_layer_redundancy, select_cacheable_layers
+from mlx_diffusion_kit.cache.layer_redundancy import analyze_layer_redundancy, select_cacheable_layers
 
 
 def main():

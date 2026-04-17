@@ -2,6 +2,58 @@
 
 All notable changes to mlx-diffusion-kit are documented here.
 
+## [Unreleased] — P7 rebuild branch
+
+Post-release audit of the initial v0.1.0 caught that five components
+(B2, B3, B5, B7, B12) had been merged with shallow or semantically
+incorrect implementations that passed tests only because the tests
+had been written against the implementation, not the reference
+algorithm. All five were rebuilt on the `feat/readme-backlog-p7`
+branch; B18 was newly implemented.
+
+### Rebuilt
+- **B5 DeepCache** — now caches the UNet deep-branch output as a
+  single tensor and skips recomputation for `cache_interval` steps,
+  per Ma et al. (CVPR 2024). Previous impl was a generic per-layer cache.
+- **B2 FBCache** — now skips only blocks 2..N and reconstructs via
+  `output = fb_output + cached_residual`. Previous impl cached the full
+  output (wrong semantics). File renamed `fbcache.py` → `fb_cache.py`.
+  Config gains `start_step` / `end_step`.
+- **B7 ToCa** — now per-layer, velocity-based scoring from 2-step
+  history, returning disjoint (active, cached) index arrays that cover
+  [0, N). Previous impl was single-step cosine over a global cache.
+- **B3 SpectralCache** — now performs real frequency-domain round-trip
+  (rFFT → split LF/HF → apply per-band caching → combine → irFFT).
+  Identity when both intervals = 1. **SeaCache variant** added as a
+  `spectral_velocity_aware` flag that invalidates the LF cache on
+  high per-band velocity. Previous impl was a step-level skip decision
+  with no actual frequency-domain caching.
+- **B12 DiTFastAttn** — now exposes the paper's 4-strategy enum
+  `AttnStrategy { FULL, WINDOW, SHARE, RESIDUAL }` with explicit
+  per-layer config lists `sharing_layers` and `residual_cache_layers`.
+  Safety fallback: missing-cache → drop to next priority tier. Previous
+  impl had only 3 strategies and conflated SHARE with RESIDUAL.
+
+### Added
+- **B18 Separable Conv3D (R(2+1)D)** — `SeparableConv3D` `nn.Module`
+  for new models (Mode A) and `decompose_conv3d_to_separable` SVD
+  utility for pretrained Conv3d kernels (Mode B), with
+  reconstruction-error reporting for rank/accuracy tradeoffs.
+- **MosaicDiff** layer-redundancy analyzer moved to its own module
+  (`cache/layer_redundancy.py`) so DeepCache stays surgical.
+
+### Internal
+- Orchestrator rewired to function-based APIs for all rebuilt components
+  (`DeepCacheManager`, `DiTFastAttnManager`, `TokenCacheManager` classes
+  removed). FBCache and SpectralCache removed from the `should_compute_step`
+  cascade — they operate at different granularities and got their own
+  methods (`should_compute_remaining_blocks`, `apply_spectral_cache`).
+- `should_compute_step` signature simplified (dropped `sigma_t`,
+  `first_block_output`).
+- Top-level `__init__.py` exports grew from 46 to 89.
+- Test count rose from 245 to 276 (new acceptance tests derived from
+  algorithm contracts, not candidate implementations).
+
 ## [0.1.0] — 2026-04-06
 
 Initial release. 21 optimization components for diffusion/VSR inference on MLX.

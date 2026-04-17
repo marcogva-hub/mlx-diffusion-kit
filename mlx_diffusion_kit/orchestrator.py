@@ -14,17 +14,34 @@ from typing import Optional
 import mlx.core as mx
 
 from mlx_diffusion_kit.attention.ditfastattn import (
+    AttnStrategy,
     DiTFastAttnConfig,
-    DiTFastAttnManager,
-    HeadStrategy,
+    DiTFastAttnState,
+    create_ditfastattn_state,
+    ditfastattn_decide,
+    ditfastattn_get_cached_attn,
+    ditfastattn_get_cached_residual,
+    ditfastattn_record_attn_map,
+    ditfastattn_record_residual,
+    ditfastattn_reset,
 )
-from mlx_diffusion_kit.cache.deep_cache import DeepCacheConfig, DeepCacheManager
+from mlx_diffusion_kit.cache.deep_cache import (
+    DeepCacheConfig,
+    DeepCacheState,
+    create_deepcache_state,
+    deepcache_get,
+    deepcache_reset,
+    deepcache_should_recompute,
+    deepcache_store,
+)
 from mlx_diffusion_kit.cache.motion import MotionConfig, MotionTracker
-from mlx_diffusion_kit.cache.fbcache import (
+from mlx_diffusion_kit.cache.fb_cache import (
     FBCacheConfig,
     FBCacheState,
     create_fbcache_state,
-    fbcache_should_compute,
+    fbcache_reconstruct,
+    fbcache_reset,
+    fbcache_should_compute_remaining,
     fbcache_update,
 )
 from mlx_diffusion_kit.cache.multigranular import MultiGranularCache, MultiGranularConfig
@@ -40,8 +57,8 @@ from mlx_diffusion_kit.cache.spectral_cache import (
     SpectralCacheConfig,
     SpectralCacheState,
     create_spectral_cache_state,
-    spectral_cache_should_compute,
-    spectral_cache_update,
+    spectral_cache_apply,
+    spectral_cache_reset,
 )
 from mlx_diffusion_kit.cache.smooth_cache import (
     SmoothCacheConfig,
@@ -64,7 +81,15 @@ from mlx_diffusion_kit.gating.tgate import (
 )
 from mlx_diffusion_kit.quality.freeu import FreeUConfig
 from mlx_diffusion_kit.tokens.ddit_scheduling import DDiTScheduleConfig, DDiTScheduler
-from mlx_diffusion_kit.tokens.toca import ToCaConfig, TokenCacheManager
+from mlx_diffusion_kit.tokens.toca import (
+    ToCaConfig,
+    ToCaState,
+    create_toca_state,
+    toca_compose,
+    toca_reset,
+    toca_select_tokens,
+    toca_update,
+)
 from mlx_diffusion_kit.tokens.tome import (
     MergeInfo,
     ToMeConfig,
@@ -167,23 +192,17 @@ class DiffusionOptimizer:
                 self.config.total_steps, self.config.ddit_schedule
             )
 
-        self._toca: Optional[TokenCacheManager] = None
+        self._toca_state: Optional[ToCaState] = None
         if self.config.toca and not self.config.is_single_step:
-            self._toca = TokenCacheManager(self.config.toca)
+            self._toca_state = create_toca_state()
 
-        self._ditfastattn: Optional[DiTFastAttnManager] = None
+        self._ditfastattn_state: Optional[DiTFastAttnState] = None
         if self.config.ditfastattn and not self.config.is_single_step:
-            self._ditfastattn = DiTFastAttnManager(
-                self.config.num_blocks,
-                self.config.num_blocks,  # num_heads — overridden by config if needed
-                self.config.ditfastattn,
-            )
+            self._ditfastattn_state = create_ditfastattn_state()
 
-        self._deep_cache: Optional[DeepCacheManager] = None
+        self._deep_cache_state: Optional[DeepCacheState] = None
         if self.config.deep_cache and not self.config.is_single_step:
-            self._deep_cache = DeepCacheManager(
-                self.config.num_blocks, self.config.deep_cache
-            )
+            self._deep_cache_state = create_deepcache_state()
 
         self._multigranular: Optional[MultiGranularCache] = None
         if self.config.multigranular and self.config.multigranular.enabled:
@@ -251,24 +270,24 @@ class DiffusionOptimizer:
         self,
         step_idx: int,
         modulated_input: mx.array,
-        first_block_output: Optional[mx.array] = None,
-        sigma_t: float = 0.5,
         frame: Optional[mx.array] = None,
     ) -> bool:
         """Check if the full model forward should run for this step.
 
-        Cascade priority (first configured wins):
-          1. TeaCache — best quality, requires calibrated coefficients
-          2. SpectralCache — frequency-domain detection, requires sigma_t
-          3. FBCache — zero-calibration fallback, requires first_block_output
+        Only TeaCache (with optional WorldCache motion adjustment) gates
+        step-level compute. FBCache and SpectralCache operate at finer
+        granularities:
+
+          * FBCache (B2) decides at the transformer-block boundary —
+            see :meth:`should_compute_remaining_blocks`.
+          * SpectralCache (B3) transforms-in / transforms-out of the
+            frequency domain — see :meth:`apply_spectral_cache`.
 
         Single-step models always return True.
 
         Args:
             step_idx: Current diffusion step.
             modulated_input: Timestep-modulated input tensor.
-            first_block_output: Output of first transformer block (for FBCache).
-            sigma_t: Current noise level 0→1 (for SpectralCache).
             frame: Current video frame (for WorldCache motion adjustment).
 
         Returns:
@@ -277,13 +296,11 @@ class DiffusionOptimizer:
         if self.config.is_single_step:
             return True
 
-        # Priority 1: TeaCache (with optional motion adjustment)
         if self._teacache_state is not None and self.config.teacache is not None:
             cfg = self.config.teacache
             if self._motion_tracker is not None and frame is not None:
                 self._motion_tracker.update(frame)
                 adjusted = self._motion_tracker.get_adjusted_threshold(cfg.rel_l1_thresh)
-                # Temporarily override threshold for this call
                 original = cfg.rel_l1_thresh
                 cfg.rel_l1_thresh = adjusted
                 result = teacache_should_compute(
@@ -295,50 +312,99 @@ class DiffusionOptimizer:
                 modulated_input, step_idx, cfg, self._teacache_state
             )
 
-        # Priority 2: SpectralCache
-        if self._spectral_cache_state is not None and self.config.spectral_cache is not None:
-            return spectral_cache_should_compute(
-                modulated_input, sigma_t, self.config.spectral_cache, self._spectral_cache_state
-            )
-
-        # Priority 3: FBCache
-        if self._fbcache_state is not None and self.config.fbcache is not None:
-            if first_block_output is not None:
-                return fbcache_should_compute(
-                    first_block_output, self.config.fbcache, self._fbcache_state
-                )
-
         return True
+
+    # --- B3 SpectralCache (frequency-domain reconstruction, not a skip gate) ---
+
+    def apply_spectral_cache(
+        self, features: mx.array, step_idx: int
+    ) -> mx.array:
+        """Reconstruct features through the frequency-domain cache.
+
+        Pass-through if SpectralCache is not configured. Otherwise runs
+        :func:`spectral_cache_apply` which forwards to the rFFT, applies
+        the LF/HF caching policy, and inverse-transforms.
+        """
+        if self._spectral_cache_state is None or self.config.spectral_cache is None:
+            return features
+        return spectral_cache_apply(
+            features, step_idx, self.config.spectral_cache, self._spectral_cache_state
+        )
+
+    # --- B2 FBCache (block-level, not step-level) ---
+
+    def should_compute_remaining_blocks(
+        self, first_block_output: mx.array, step_idx: int
+    ) -> bool:
+        """FBCache decision: should the caller run blocks 2..N this step?
+
+        Returns True if FBCache is not configured (caller must compute)
+        or if the change in first-block output is above threshold.
+        Returns False if the caller should reuse the cached residual via
+        :meth:`fbcache_reconstruct`.
+        """
+        if (
+            self.config.is_single_step
+            or self._fbcache_state is None
+            or self.config.fbcache is None
+        ):
+            return True
+        return fbcache_should_compute_remaining(
+            first_block_output, step_idx, self.config.fbcache, self._fbcache_state
+        )
+
+    def fbcache_update_residual(
+        self, fb_output: mx.array, residual: mx.array
+    ) -> None:
+        """Record fresh (first-block-output, residual) after running all blocks."""
+        if self._fbcache_state is not None:
+            fbcache_update(fb_output, residual, self._fbcache_state)
+
+    def fbcache_reconstruct_output(self, fb_output: mx.array) -> mx.array:
+        """Return fb_output + cached_residual. Requires prior update."""
+        if self._fbcache_state is None:
+            raise RuntimeError("FBCache is not configured on this optimizer.")
+        return fbcache_reconstruct(fb_output, self._fbcache_state)
 
     def update_step_cache(
         self,
         modulated_input: mx.array,
         output: mx.array,
         step_idx: int = 0,
-        first_block_output: Optional[mx.array] = None,
     ) -> None:
-        """Update all step-level caches after a computed step.
+        """Update step-level caches after a computed step.
+
+        Covers TeaCache, SpectralCache, and SmoothCache. FBCache is NOT
+        updated here because it caches a residual, not a full output;
+        use :meth:`fbcache_update_residual` from within the block-level
+        decision flow.
 
         Args:
             modulated_input: The input that was computed.
             output: The model's output.
             step_idx: Current step index (used by SmoothCache for interpolation).
-            first_block_output: First block output (for FBCache update).
         """
         if self._teacache_state is not None:
             teacache_update(modulated_input, output, self._teacache_state)
-        if self._fbcache_state is not None and first_block_output is not None:
-            fbcache_update(first_block_output, output, self._fbcache_state)
-        if self._spectral_cache_state is not None:
-            spectral_cache_update(modulated_input, output, self._spectral_cache_state)
+        # Note: SpectralCache is NOT updated here. Its state is a sequence of
+        # frequency-domain snapshots of an arbitrary intermediate feature
+        # stream chosen by the caller, not of `modulated_input`. SpectralCache
+        # manages its own state via :meth:`apply_spectral_cache`; force-
+        # refreshing it from a step-level hook with a different tensor would
+        # corrupt the cache (shape and semantics would both drift).
         if self._smooth_cache_state is not None:
             smooth_cache_record(step_idx, output, self._smooth_cache_state)
 
     def get_cached_output(self, step_idx: int = 0) -> Optional[mx.array]:
-        """Retrieve output for a skipped step.
+        """Retrieve output for a skipped step (step-level caches only).
 
         If SmoothCache is configured, returns interpolated features.
         Otherwise, returns the raw TeaCache cached residual.
+
+        Note: this method does NOT return FBCache or SpectralCache data.
+        FBCache stores a residual — use :meth:`fbcache_reconstruct_output`.
+        SpectralCache reconstructs via inverse transform — use
+        :meth:`apply_spectral_cache`.
 
         Args:
             step_idx: The step being skipped (for SmoothCache interpolation).
@@ -353,10 +419,6 @@ class DiffusionOptimizer:
             )
         if self._teacache_state is not None:
             return self._teacache_state.cached_residual
-        if self._spectral_cache_state is not None:
-            return self._spectral_cache_state.cached_output
-        if self._fbcache_state is not None:
-            return self._fbcache_state.cached_full_output
         return None
 
     def merge_tokens(self, tokens: mx.array) -> mx.array:
@@ -481,36 +543,113 @@ class DiffusionOptimizer:
         return self._ddit_scheduler.get_patch_stride(step_idx)
 
     @property
-    def toca_manager(self) -> Optional[TokenCacheManager]:
-        return self._toca
+    def toca_state(self) -> Optional[ToCaState]:
+        return self._toca_state
 
-    @property
-    def ditfastattn_manager(self) -> Optional[DiTFastAttnManager]:
-        return self._ditfastattn
+    # --- B7 ToCa (per-layer token-level caching across steps) ---
 
-    @property
-    def deep_cache_manager(self) -> Optional[DeepCacheManager]:
-        return self._deep_cache
+    def toca_select(
+        self, tokens: mx.array, layer_idx: int, step_idx: int
+    ) -> Optional[tuple[mx.array, mx.array]]:
+        """Partition tokens into (active, cached) indices for this layer.
 
-    def should_compute_layer_deep(self, layer_idx: int, step_idx: int) -> bool:
-        """Check if a UNet layer should be computed (DeepCache).
-
-        Returns True if DeepCache is not configured or for non-cached layers.
+        Returns None if ToCa is not configured. Otherwise returns the
+        (active_indices, cached_indices) tuple from :func:`toca_select_tokens`.
         """
-        if self._deep_cache is None:
-            return True
-        return self._deep_cache.should_compute_layer(layer_idx, step_idx)
-
-    def get_deep_cached_layer(self, layer_idx: int) -> Optional[mx.array]:
-        """Retrieve DeepCache cached output for a layer."""
-        if self._deep_cache is None:
+        if self._toca_state is None or self.config.toca is None:
             return None
-        return self._deep_cache.get_cached_layer(layer_idx)
+        return toca_select_tokens(
+            tokens, layer_idx, step_idx, self.config.toca, self._toca_state
+        )
 
-    def update_deep_cache_layer(self, layer_idx: int, step_idx: int, output: mx.array) -> None:
-        """Update DeepCache for a layer."""
-        if self._deep_cache is not None:
-            self._deep_cache.update_layer(layer_idx, step_idx, output)
+    def toca_record(self, layer_idx: int, tokens: mx.array) -> None:
+        """Record post-block tokens for a layer after the caller assembled them."""
+        if self._toca_state is not None:
+            toca_update(layer_idx, tokens, self._toca_state)
+
+    def toca_compose_tokens(
+        self,
+        active_features: mx.array,
+        cached_features: mx.array,
+        active_indices: mx.array,
+        cached_indices: mx.array,
+        total_n: int,
+    ) -> mx.array:
+        """Reassemble the full token tensor. Convenience passthrough."""
+        return toca_compose(
+            active_features, cached_features, active_indices, cached_indices, total_n
+        )
+
+    @property
+    def ditfastattn_state(self) -> Optional[DiTFastAttnState]:
+        return self._ditfastattn_state
+
+    # --- B12 DiTFastAttn (per-layer attention strategy policy) ---
+
+    def get_attn_strategy(self, layer_idx: int, step_idx: int) -> AttnStrategy:
+        """Return the attention strategy for a (layer, step).
+
+        FULL if DiTFastAttn is not configured. Otherwise the decision
+        comes from :func:`ditfastattn_decide`.
+        """
+        if self._ditfastattn_state is None or self.config.ditfastattn is None:
+            return AttnStrategy.FULL
+        return ditfastattn_decide(
+            layer_idx, step_idx, self.config.ditfastattn, self._ditfastattn_state
+        )
+
+    def record_attn_map(self, layer_idx: int, attn_map: mx.array) -> None:
+        """Record a post-softmax attention map for later SHARE reuse."""
+        if self._ditfastattn_state is not None:
+            ditfastattn_record_attn_map(layer_idx, attn_map, self._ditfastattn_state)
+
+    def get_cached_attn_map(self, layer_idx: int) -> Optional[mx.array]:
+        """Return a cached attention map, or None."""
+        if self._ditfastattn_state is None:
+            return None
+        return ditfastattn_get_cached_attn(layer_idx, self._ditfastattn_state)
+
+    def record_attn_residual(self, layer_idx: int, residual: mx.array) -> None:
+        """Record an attention-block residual for later RESIDUAL reuse."""
+        if self._ditfastattn_state is not None:
+            ditfastattn_record_residual(layer_idx, residual, self._ditfastattn_state)
+
+    def get_cached_attn_residual(self, layer_idx: int) -> Optional[mx.array]:
+        """Return a cached attention residual, or None."""
+        if self._ditfastattn_state is None:
+            return None
+        return ditfastattn_get_cached_residual(layer_idx, self._ditfastattn_state)
+
+    @property
+    def deep_cache_state(self) -> Optional[DeepCacheState]:
+        return self._deep_cache_state
+
+    def should_recompute_deep(self, step_idx: int) -> bool:
+        """Decide whether to run the UNet deep branch this step (DeepCache).
+
+        Returns True if DeepCache is not configured (caller recomputes), or
+        if the caching policy says this step must recompute.
+        """
+        if self._deep_cache_state is None or self.config.deep_cache is None:
+            return True
+        return deepcache_should_recompute(
+            step_idx, self.config.deep_cache, self._deep_cache_state
+        )
+
+    def get_cached_deep_features(self) -> Optional[mx.array]:
+        """Retrieve the cached deep-branch features, or None if absent."""
+        if self._deep_cache_state is None:
+            return None
+        return deepcache_get(self._deep_cache_state)
+
+    def store_deep_features(self, features: mx.array, step_idx: int) -> None:
+        """Record freshly computed deep-branch features.
+
+        Must be called by the model wrapper on every step that actually
+        runs the deep branch, immediately after computing it.
+        """
+        if self._deep_cache_state is not None:
+            deepcache_store(features, step_idx, self._deep_cache_state)
 
     @property
     def motion_tracker(self) -> Optional[MotionTracker]:
@@ -533,19 +672,19 @@ class DiffusionOptimizer:
         if self._fbcache_state is not None:
             self._fbcache_state = create_fbcache_state()
         if self._spectral_cache_state is not None:
-            self._spectral_cache_state = create_spectral_cache_state()
+            spectral_cache_reset(self._spectral_cache_state)
         if self._tgate_state is not None:
             self._tgate_state = create_tgate_state()
         if self._smooth_cache_state is not None:
             self._smooth_cache_state = create_smooth_cache_state()
         if self._encoder_sharing_state is not None:
             self._encoder_sharing_state = create_encoder_sharing_state()
-        if self._toca is not None:
-            self._toca.reset()
-        if self._ditfastattn is not None:
-            self._ditfastattn.reset()
-        if self._deep_cache is not None:
-            self._deep_cache.reset()
+        if self._toca_state is not None:
+            toca_reset(self._toca_state)
+        if self._ditfastattn_state is not None:
+            ditfastattn_reset(self._ditfastattn_state)
+        if self._deep_cache_state is not None:
+            deepcache_reset(self._deep_cache_state)
         if self._multigranular is not None:
             self._multigranular.clear()
         self._last_merge_info = None

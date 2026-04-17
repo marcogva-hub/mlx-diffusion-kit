@@ -9,15 +9,24 @@ from mlx_diffusion_kit.cache.motion import (
 )
 from mlx_diffusion_kit.cache.deep_cache import (
     DeepCacheConfig,
-    DeepCacheManager,
+    DeepCacheState,
+    create_deepcache_state,
+    deepcache_get,
+    deepcache_reset,
+    deepcache_should_recompute,
+    deepcache_store,
+)
+from mlx_diffusion_kit.cache.layer_redundancy import (
     analyze_layer_redundancy,
     select_cacheable_layers,
 )
-from mlx_diffusion_kit.cache.fbcache import (
+from mlx_diffusion_kit.cache.fb_cache import (
     FBCacheConfig,
     FBCacheState,
     create_fbcache_state,
-    fbcache_should_compute,
+    fbcache_reconstruct,
+    fbcache_reset,
+    fbcache_should_compute_remaining,
     fbcache_update,
 )
 from mlx_diffusion_kit.cache.multigranular import (
@@ -43,7 +52,8 @@ from mlx_diffusion_kit.cache.spectral_cache import (
     SpectralCacheConfig,
     SpectralCacheState,
     create_spectral_cache_state,
-    spectral_cache_should_compute,
+    spectral_cache_apply,
+    spectral_cache_reset,
     spectral_cache_update,
 )
 from mlx_diffusion_kit.cache.smooth_cache import (
@@ -66,20 +76,29 @@ from mlx_diffusion_kit.cache.teacache import (
 __all__ = [
     # B5 DeepCache
     "DeepCacheConfig",
-    "DeepCacheManager",
+    "DeepCacheState",
+    "create_deepcache_state",
+    "deepcache_get",
+    "deepcache_reset",
+    "deepcache_should_recompute",
+    "deepcache_store",
+    # MosaicDiff layer redundancy (formerly bundled with DeepCache)
     "analyze_layer_redundancy",
     "select_cacheable_layers",
     # B2 FBCache
     "FBCacheConfig",
     "FBCacheState",
     "create_fbcache_state",
-    "fbcache_should_compute",
+    "fbcache_reconstruct",
+    "fbcache_reset",
+    "fbcache_should_compute_remaining",
     "fbcache_update",
     # B3 SpectralCache
     "SpectralCacheConfig",
     "SpectralCacheState",
     "create_spectral_cache_state",
-    "spectral_cache_should_compute",
+    "spectral_cache_apply",
+    "spectral_cache_reset",
     "spectral_cache_update",
     # B1 TeaCache
     "TeaCacheConfig",
@@ -112,4 +131,10 @@ __all__ = [
     "create_smooth_cache_state",
     "smooth_cache_interpolate",
     "smooth_cache_record",
+    # WorldCache motion
+    "MotionConfig",
+    "MotionTracker",
+    "estimate_motion",
+    "motion_adjusted_threshold",
+    "warp_features_by_motion",
 ]

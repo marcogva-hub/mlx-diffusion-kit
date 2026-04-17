@@ -1,113 +1,176 @@
-"""Tests for B12 DiTFastAttn."""
+"""Tests for B12 DiTFastAttn decision policy.
+
+Contract invariants (from :func:`ditfastattn_decide` precedence):
+  - Step 0 always returns FULL (no cache exists yet).
+  - Disabled config always returns FULL.
+  - RESIDUAL beats SHARE beats WINDOW beats FULL, when the required
+    cache entry exists.
+  - If a layer is in ``sharing_layers`` but no cached attn map exists,
+    fall through to WINDOW / FULL (never return SHARE without a cache).
+  - Same safety for RESIDUAL.
+  - WINDOW only activates at ``window_start_step`` and later.
+  - record/get round-trips for both caches.
+  - Reset clears both cache dicts.
+"""
 
 import mlx.core as mx
 
 from mlx_diffusion_kit.attention.ditfastattn import (
+    AttnStrategy,
     DiTFastAttnConfig,
-    DiTFastAttnManager,
-    HeadStrategy,
+    DiTFastAttnState,
+    create_ditfastattn_state,
+    ditfastattn_decide,
+    ditfastattn_get_cached_attn,
+    ditfastattn_get_cached_residual,
+    ditfastattn_record_attn_map,
+    ditfastattn_record_residual,
+    ditfastattn_reset,
 )
 
 
-def test_before_profiling_all_full():
-    """Before profiling, all heads should use FULL strategy."""
-    cfg = DiTFastAttnConfig(auto_profile_steps=3)
-    mgr = DiTFastAttnManager(num_layers=4, num_heads=8, config=cfg)
-
-    for l in range(4):
-        for h in range(8):
-            assert mgr.get_head_strategy(l, h, 0) == HeadStrategy.FULL
-
-
-def test_profiling_assigns_strategies():
-    """After profiling, heads get differentiated strategies."""
-    cfg = DiTFastAttnConfig(auto_profile_steps=3, sensitivity_threshold=0.1)
-    mgr = DiTFastAttnManager(num_layers=2, num_heads=2, config=cfg)
-
-    # Profile 3 steps: head (0,0) has low variance, head (0,1) has high variance
-    for step in range(3):
-        # Head (0,0): constant attention → low variance
-        mgr.profile_step(0, 0, mx.ones((4, 4)) * 0.25, step)
-        # Head (0,1): varying attention → high variance
-        mgr.profile_step(0, 1, mx.random.normal((4, 4)) * (step + 1), step)
-        # Head (1,0): constant
-        mgr.profile_step(1, 0, mx.ones((4, 4)) * 0.5, step)
-        # Head (1,1): varying
-        mgr.profile_step(1, 1, mx.random.normal((4, 4)) * (step + 1) * 2, step)
-
-    assert mgr._state.profiled
-    # Low-variance heads should be CACHED
-    assert mgr.get_head_strategy(0, 0, 10) == HeadStrategy.CACHED
-    # High-variance heads should be FULL
-    assert mgr.get_head_strategy(0, 1, 10) == HeadStrategy.FULL
-
-
-def test_high_variance_head_full():
-    """Explicitly high sensitivity → FULL."""
-    scores = {(0, 0): 0.5, (0, 1): 0.01}
-    cfg = DiTFastAttnConfig(head_sensitivity_scores=scores, sensitivity_threshold=0.1)
-    mgr = DiTFastAttnManager(2, 2, cfg)
-    assert mgr.get_head_strategy(0, 0, 10) == HeadStrategy.FULL
-    assert mgr.get_head_strategy(0, 1, 10) == HeadStrategy.CACHED
-
-
-def test_cached_only_after_start_step():
-    """CACHED heads should use FULL before cache_start_step."""
-    scores = {(0, 0): 0.01}
+def test_step_zero_is_always_full():
     cfg = DiTFastAttnConfig(
-        head_sensitivity_scores=scores,
-        sensitivity_threshold=0.1,
-        cache_start_step=5,
+        window_start_step=0,
+        sharing_layers=[0, 1],
+        residual_cache_layers=[0, 1],
     )
-    mgr = DiTFastAttnManager(1, 1, cfg)
+    state = create_ditfastattn_state()
+    ditfastattn_record_attn_map(0, mx.ones((4, 4)), state)
+    ditfastattn_record_residual(0, mx.ones((4, 4)), state)
 
-    assert mgr.get_head_strategy(0, 0, 3) == HeadStrategy.FULL  # Before start
-    assert mgr.get_head_strategy(0, 0, 5) == HeadStrategy.CACHED  # At/after start
-
-
-def test_window_mask():
-    """Window mask should be diagonal band of correct width."""
-    cfg = DiTFastAttnConfig(window_size=4)
-    mgr = DiTFastAttnManager(1, 1, cfg)
-
-    mask = mgr.get_window_mask(8)
-    assert mask.shape == (8, 8)
-    # Center should be True
-    assert mask[0, 0].item()
-    assert mask[4, 4].item()
-    # Diagonal + 2 off-diagonals (half_w=2) should be True
-    assert mask[0, 2].item()  # |0-2| = 2 <= 2
-    assert not mask[0, 3].item()  # |0-3| = 3 > 2
+    for layer in (0, 1):
+        assert ditfastattn_decide(layer, 0, cfg, state) == AttnStrategy.FULL
 
 
-def test_cache_get_roundtrip():
-    cfg = DiTFastAttnConfig()
-    mgr = DiTFastAttnManager(2, 4, cfg)
+def test_disabled_is_always_full():
+    cfg = DiTFastAttnConfig(enabled=False, residual_cache_layers=[0])
+    state = create_ditfastattn_state()
+    ditfastattn_record_residual(0, mx.ones((4, 4)), state)
 
+    assert ditfastattn_decide(0, 5, cfg, state) == AttnStrategy.FULL
+
+
+def test_residual_wins_when_configured_and_cached():
+    cfg = DiTFastAttnConfig(
+        window_start_step=0,
+        sharing_layers=[0],
+        residual_cache_layers=[0],
+    )
+    state = create_ditfastattn_state()
+    ditfastattn_record_attn_map(0, mx.ones((4, 4)), state)
+    ditfastattn_record_residual(0, mx.ones((4, 4)), state)
+
+    assert ditfastattn_decide(0, 3, cfg, state) == AttnStrategy.RESIDUAL
+
+
+def test_share_wins_over_window_when_configured_and_cached():
+    cfg = DiTFastAttnConfig(
+        window_start_step=0,
+        sharing_layers=[0],
+        residual_cache_layers=[],
+    )
+    state = create_ditfastattn_state()
+    ditfastattn_record_attn_map(0, mx.ones((4, 4)), state)
+
+    assert ditfastattn_decide(0, 5, cfg, state) == AttnStrategy.SHARE
+
+
+def test_sharing_without_cache_falls_through():
+    """A layer in sharing_layers but with no cache must NOT return SHARE."""
+    cfg = DiTFastAttnConfig(window_start_step=10, sharing_layers=[0])
+    state = create_ditfastattn_state()  # no cache recorded
+
+    # Below window_start_step: should be FULL, not SHARE.
+    assert ditfastattn_decide(0, 5, cfg, state) == AttnStrategy.FULL
+    # At/after window_start_step: WINDOW, not SHARE.
+    assert ditfastattn_decide(0, 10, cfg, state) == AttnStrategy.WINDOW
+
+
+def test_residual_without_cache_falls_through():
+    cfg = DiTFastAttnConfig(window_start_step=10, residual_cache_layers=[0])
+    state = create_ditfastattn_state()
+
+    assert ditfastattn_decide(0, 5, cfg, state) == AttnStrategy.FULL
+    assert ditfastattn_decide(0, 10, cfg, state) == AttnStrategy.WINDOW
+
+
+def test_window_activates_at_start_step():
+    cfg = DiTFastAttnConfig(window_start_step=5)
+    state = create_ditfastattn_state()
+
+    # Step 4: still FULL (both before start and after step 0 for a plain layer).
+    assert ditfastattn_decide(3, 4, cfg, state) == AttnStrategy.FULL
+    # Step 5: boundary → WINDOW.
+    assert ditfastattn_decide(3, 5, cfg, state) == AttnStrategy.WINDOW
+    # Step 20: still WINDOW.
+    assert ditfastattn_decide(3, 20, cfg, state) == AttnStrategy.WINDOW
+
+
+def test_non_listed_layer_uses_window_not_share_or_residual():
+    cfg = DiTFastAttnConfig(
+        window_start_step=5,
+        sharing_layers=[0],
+        residual_cache_layers=[1],
+    )
+    state = create_ditfastattn_state()
+    ditfastattn_record_attn_map(0, mx.ones((4, 4)), state)
+    ditfastattn_record_residual(1, mx.ones((4, 4)), state)
+
+    # Layer 2 is not listed anywhere → follows the window timing.
+    assert ditfastattn_decide(2, 4, cfg, state) == AttnStrategy.FULL
+    assert ditfastattn_decide(2, 5, cfg, state) == AttnStrategy.WINDOW
+
+
+def test_attn_map_roundtrip():
+    state = create_ditfastattn_state()
     val = mx.random.normal((8, 8))
-    mgr.cache_attention(0, 1, val)
-    cached = mgr.get_cached_attention(0, 1)
+    ditfastattn_record_attn_map(3, val, state)
+    cached = ditfastattn_get_cached_attn(3, state)
     assert cached is not None
     assert mx.array_equal(cached, val)
-
-    assert mgr.get_cached_attention(0, 2) is None
-
-
-def test_reset():
-    scores = {(0, 0): 0.01}
-    cfg = DiTFastAttnConfig(head_sensitivity_scores=scores, sensitivity_threshold=0.1)
-    mgr = DiTFastAttnManager(1, 1, cfg)
-    mgr.cache_attention(0, 0, mx.ones((4, 4)))
-
-    mgr.reset()
-    assert mgr.get_cached_attention(0, 0) is None
-    # Strategies should be re-assigned from pre-computed scores
-    assert mgr._state.profiled
+    assert ditfastattn_get_cached_attn(99, state) is None
 
 
-def test_disabled():
-    cfg = DiTFastAttnConfig(enabled=False)
-    scores = {(0, 0): 0.01}
-    cfg.head_sensitivity_scores = scores
-    mgr = DiTFastAttnManager(1, 1, cfg)
-    assert mgr.get_head_strategy(0, 0, 10) == HeadStrategy.FULL
+def test_residual_roundtrip():
+    state = create_ditfastattn_state()
+    val = mx.random.normal((4, 16))
+    ditfastattn_record_residual(2, val, state)
+    cached = ditfastattn_get_cached_residual(2, state)
+    assert cached is not None
+    assert mx.array_equal(cached, val)
+    assert ditfastattn_get_cached_residual(99, state) is None
+
+
+def test_reset_clears_both_caches():
+    state = create_ditfastattn_state()
+    ditfastattn_record_attn_map(0, mx.ones((4, 4)), state)
+    ditfastattn_record_residual(1, mx.ones((4, 4)), state)
+    assert state.cached_attn_maps
+    assert state.cached_residuals
+
+    ditfastattn_reset(state)
+    assert state.cached_attn_maps == {}
+    assert state.cached_residuals == {}
+
+
+def test_four_distinct_strategies_achievable():
+    """Sanity: with proper config + caches, all four enum values are reachable."""
+    state = create_ditfastattn_state()
+    ditfastattn_record_attn_map(1, mx.ones((4, 4)), state)
+    ditfastattn_record_residual(2, mx.ones((4, 4)), state)
+
+    cfg = DiTFastAttnConfig(
+        window_start_step=5,
+        sharing_layers=[1],
+        residual_cache_layers=[2],
+    )
+
+    # FULL (step 0)
+    assert ditfastattn_decide(0, 0, cfg, state) == AttnStrategy.FULL
+    # WINDOW (step 5, plain layer)
+    assert ditfastattn_decide(0, 5, cfg, state) == AttnStrategy.WINDOW
+    # SHARE (layer 1 with cached map)
+    assert ditfastattn_decide(1, 3, cfg, state) == AttnStrategy.SHARE
+    # RESIDUAL (layer 2 with cached residual)
+    assert ditfastattn_decide(2, 3, cfg, state) == AttnStrategy.RESIDUAL
