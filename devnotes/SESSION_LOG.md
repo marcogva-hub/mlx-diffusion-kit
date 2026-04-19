@@ -823,3 +823,52 @@ integration tests + cleanup, no new features, no breaking API changes).
   reference and mutates it), it wouldn't show. Given the small codebase size
   (~5600 LOC) and the narrow set of dataclass configs, this is very unlikely —
   but noted here for completeness.
+
+---
+## [2026-04-18 14:00] Phase P10.1: SkipSR abandonment
+
+### Decision
+Abandon `feat/skipsr` branch without merging. Do NOT ship SkipSR as a
+mlx-diffusion-kit component under any name.
+
+### Rationale
+Re-reading SkipSR (arXiv 2510.08799, 2025) revealed three hard
+incompatibilities with the P10.0 implementation:
+
+1. **Scoring operates on low-resolution input image** (image-space
+   Laplacian + mask predictor), not on patchified features in [B, N, D]
+   layout. Our `compute_laplacian_variance` (in fact `mx.var(axis=-1)`
+   on features) is the wrong operation on the wrong tensor.
+
+2. **Mask predictor is not optional** — the paper's method IS the
+   trainable predictor. Heuristic fallback (variance-based or even true
+   image-space Laplacian without learned weights) is not SkipSR.
+
+3. **Mask-aware rotary positional encodings** are a model-side contract
+   the paper requires. Our orchestration layer cannot enforce that from
+   outside the transformer.
+
+The P10.0 implementation was therefore "inspired-by-SkipSR", not SkipSR.
+Shipping it under the SkipSR name would mislead users; shipping it under
+any other name was rejected because the component has no clear value
+without the mask-aware RoPE integration the paper relies on.
+
+This decision is consistent with the earlier exclusion of SLA / LLSA /
+SALAD from the inference-only catalog (all fundamentally trainable).
+
+### Actions taken
+- `git branch -D feat/skipsr` — branch deleted, 2 commits dropped
+  (c45a3ab P10.0 SkipSR impl, 450811b P10.0 session log).
+- No code shipped on any main-bound branch.
+- main stays at v0.2.1, tag unchanged.
+
+### Forward plan
+SkipSR moves to the "trainable — excluded from inference-only catalog"
+list. Re-evaluation only if:
+- someone publishes a SkipSR-compatible mask predictor checkpoint for a
+  VSR model we already port, OR
+- the user decides to fine-tune a mask predictor themselves on the
+  target dataset.
+
+Livrable 1 next items: port STCDiT (Wan2.1-based VSR), watch InfVSR
+(weights release pending). Livrable 2 items gated on M5 Max arrival.
