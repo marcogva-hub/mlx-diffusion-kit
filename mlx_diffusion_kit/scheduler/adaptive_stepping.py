@@ -4,7 +4,7 @@ Detects convergence between consecutive denoising outputs and skips
 redundant steps. Training-free, wraps any scheduler.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import mlx.core as mx

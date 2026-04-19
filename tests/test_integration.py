@@ -378,3 +378,106 @@ class TestSmoothCacheIntegration:
 
         opt.reset()
         assert len(opt.smooth_cache_state.history) == 0
+
+
+# ---------------------------------------------------------------------------
+# Scenario 5 — End-to-end compose of 4 rebuilt components (P7 + P8)
+# ---------------------------------------------------------------------------
+
+
+def test_rebuilt_components_compose_without_desync():
+    """P9.1 regression: simulate a 10-step multi-step DiT pass with TeaCache,
+    FBCache, SpectralCache, and DeepCache all active through
+    DiffusionOptimizer. Verify no cross-component state corruption, shapes
+    remain coherent, and reset() cleans everything.
+
+    This is the scenario that the P7 SpectralCache wiring bug (fixed in P8
+    Fix 1) would have broken. It stays green as long as the orchestrator
+    wires the rebuilt components correctly.
+    """
+    from mlx_diffusion_kit.cache.teacache import TeaCacheConfig
+    from mlx_diffusion_kit.cache.fb_cache import FBCacheConfig
+    from mlx_diffusion_kit.cache.spectral_cache import SpectralCacheConfig
+    from mlx_diffusion_kit.cache.deep_cache import DeepCacheConfig
+
+    opt_cfg = OrchestratorConfig(
+        teacache=TeaCacheConfig(rel_l1_thresh=0.1),
+        fbcache=FBCacheConfig(rel_l1_thresh=0.1),
+        spectral_cache=SpectralCacheConfig(
+            low_freq_ratio=0.25,
+            cache_interval_low=3,
+            cache_interval_high=1,
+        ),
+        deep_cache=DeepCacheConfig(cache_interval=2),
+        is_single_step=False,
+        num_blocks=8,
+        total_steps=10,
+    )
+    opt = DiffusionOptimizer(opt_cfg)
+
+    # Shapes mimic a small DiT pass — kept deliberately small so the test
+    # runs in the millisecond range.
+    modulated_shape = (1, 256, 64)   # latent input to the model
+    feature_shape = (1, 128, 128)    # intermediate features for SpectralCache
+    fb_shape = (1, 64, 128)          # first-block output
+    deep_shape = (1, 32, 128)        # deep-branch output
+
+    for step in range(10):
+        modulated = mx.random.normal(modulated_shape)
+        features = mx.random.normal(feature_shape)
+        fb_out = mx.random.normal(fb_shape)
+        full_out = mx.random.normal(fb_shape)
+        deep_out = mx.random.normal(deep_shape)
+
+        # ---- Step-level (TeaCache) ----
+        compute = opt.should_compute_step(step_idx=step, modulated_input=modulated)
+        assert isinstance(compute, bool)
+
+        # ---- Block-level (FBCache) ----
+        compute_remaining = opt.should_compute_remaining_blocks(fb_out, step_idx=step)
+        assert isinstance(compute_remaining, bool)
+        if not compute_remaining:
+            reconstructed = opt.fbcache_reconstruct_output(fb_out)
+            assert reconstructed.shape == fb_shape
+        else:
+            # Record what the "remaining blocks" would have produced so
+            # future skips have a residual to reuse.
+            residual = full_out - fb_out
+            opt.fbcache_update_residual(fb_out, residual)
+
+        # ---- Deep-branch (DeepCache) ----
+        if opt.should_recompute_deep(step_idx=step):
+            opt.store_deep_features(deep_out, step_idx=step)
+        else:
+            cached_deep = opt.get_cached_deep_features()
+            assert cached_deep is not None, f"DeepCache cache missing at step {step}"
+            assert cached_deep.shape == deep_shape
+
+        # ---- Feature-level freq caching (SpectralCache) ----
+        # This is the path that was broken pre-P8-Fix-1. The caller's
+        # feature stream (feature_shape) is independent from modulated_input
+        # (modulated_shape) — they must stay independent through all steps.
+        cached_features = opt.apply_spectral_cache(features, step_idx=step)
+        assert cached_features.shape == feature_shape, (
+            f"SpectralCache desync at step {step}: expected {feature_shape}, "
+            f"got {cached_features.shape}"
+        )
+        assert mx.all(mx.isfinite(cached_features)).item(), (
+            f"SpectralCache produced non-finite values at step {step}"
+        )
+
+        # ---- Orchestrator step-cache update ----
+        # Per P8 Fix 1, this must NOT touch SpectralCache state.
+        if compute:
+            opt.update_step_cache(
+                modulated_input=modulated,
+                output=mx.random.normal(modulated_shape),
+                step_idx=step,
+            )
+
+    # ---- Reset cleans everything ----
+    opt.reset()
+    assert opt._teacache_state.prev_modulated_input is None
+    assert opt._fbcache_state.cached_residual is None
+    assert opt._spectral_cache_state.cached_low_freq is None
+    assert opt._deep_cache_state.cached_deep_features is None

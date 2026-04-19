@@ -9,7 +9,7 @@ for Video Diffusion Model" (CVPR 2025 Highlight).
 """
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 

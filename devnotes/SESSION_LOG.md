@@ -715,3 +715,111 @@ c2a0a73 feat(B18): add bias parameter to build_separable_from_decomposition
 
 ### Status
 Ready for merge review on `feat/readme-backlog-p7`. No push yet per prompt directive.
+
+---
+## [2026-04-18 10:00] Phase P9.0-P9.2: v0.2.0 review cleanup
+
+### Plan
+- **Objective:** Apply all 5 findings from the mlx-code-review of main@v0.2.0.
+  P9.0 exception-safety fix + codebase sweep for the same anti-pattern;
+  P9.1 integration test for rebuilt components (carried from P8);
+  P9.2 minor cleanup (DiffSparse TODO, unused imports, dead telemetry).
+- **Branch:** `chore/p9-cleanup` from `main@v0.2.0` (commit 18e8273).
+- **Target tag after merge:** `v0.2.1`.
+- **Files touched:** orchestrator.py, cache/fb_cache.py, cache/teacache.py,
+  cache/multigranular.py, scheduler/dpm_solver_v3.py, scheduler/adaptive_stepping.py,
+  vae/wavelet_cache.py, tokens/learned_sparsity.py,
+  tests/test_orchestrator.py, tests/test_integration.py, tests/test_fb_cache.py.
+- **Dependencies impacted:** None at public-API level. FBCacheState loses the
+  internal `step_counter` field (never documented as public).
+
+### Changes made — P9.0 (exception-safety fix)
+- `orchestrator.py:10` — added `replace` to existing `from dataclasses import ...` line [HIGH]
+- `orchestrator.py:301-313` — replaced save-mutate-restore of `cfg.rel_l1_thresh`
+  with `dataclasses.replace(cfg, rel_l1_thresh=adjusted)`. TeaCacheConfig is a
+  @dataclass of scalars + Optional[list[float]] so `replace` is a cheap shallow
+  copy. Exception-safe by construction. [HIGH]
+- `tests/test_orchestrator.py` — new regression test
+  `test_motion_adjusted_threshold_does_not_mutate_user_config_on_exception`.
+  Primes TeaCacheState via should_compute_step + update_step_cache, corrupts
+  `prev_modulated_input` to a string, forces teacache_should_compute to raise,
+  then asserts `tc_cfg.rel_l1_thresh` is unchanged. **Verified to fail against
+  the pre-fix code** via `git stash push -- orchestrator.py` round-trip, confirming
+  the test is not tautological. [HIGH]
+
+### P9.0.2 — anti-pattern sweep results
+Grep patterns searched:
+- `original = ` → 0 matches in mlx_diffusion_kit/
+- `= original$` (line-end restore) → 0 matches
+- `saved = `, `prev_value = `, `old_value = ` → 0 matches
+- `finally:` (where restore could hide) → 0 matches
+- `setattr(` (invisible mutation) → 0 matches
+- `^\s+(config|cfg|self\.config|self\.cfg)\.[a-z_]+ = ` (direct attribute writes
+  on dataclass instances) → 0 matches
+- `config\.|cfg\.` with ` = ` on the right side, filtered to exclude reads
+  (`threshold = self.config.X`, etc.) → 0 write-sites
+
+**Conclusion:** the motion branch in orchestrator.py was the only occurrence of
+save-mutate-restore in the codebase. No other refactor needed.
+
+### Changes made — P9.1 (integration test)
+- `tests/test_integration.py` — new test
+  `test_rebuilt_components_compose_without_desync` (Scenario 5). Simulates a
+  10-step multi-step DiT pass with TeaCache, FBCache, SpectralCache, and
+  DeepCache all active through DiffusionOptimizer. Uses deliberately distinct
+  shapes for the four components' tensors (modulated_input, features, fb_out,
+  deep_out) so any cross-cache shape corruption is visible. Asserts reset()
+  clears all four caches. [HIGH]
+
+### Changes made — P9.2 (minor cleanup)
+- `tokens/learned_sparsity.py:59` — TODO(future) comment on `self._pretrained
+  = False` explaining the intentionally-unreachable learned branch [HIGH]
+- `orchestrator.py:37,43` — remove `MotionConfig` and `fbcache_reset` from
+  import lists (neither referenced in the file after P7) [HIGH]
+- `cache/teacache.py:12`, `cache/multigranular.py:10`,
+  `scheduler/dpm_solver_v3.py:14`, `scheduler/adaptive_stepping.py:7`,
+  `orchestrator.py:10`, `vae/wavelet_cache.py:11` — remove unused `field`
+  from `from dataclasses import ...` in 6 files (swept via ast+grep heuristic) [HIGH]
+- `cache/fb_cache.py` — remove `step_counter: int = 0` from FBCacheState,
+  remove the `state.step_counter += 1` line from fbcache_should_compute_remaining,
+  remove the `state.step_counter = 0` line from fbcache_reset, update docstring [HIGH]
+- `tests/test_fb_cache.py:177` — remove the `assert state.step_counter == 0`
+  line from the reset test [HIGH]
+
+### Dependency & regression check
+- `grep -n "cfg.rel_l1_thresh = " mlx_diffusion_kit/orchestrator.py` → empty ✓
+- `grep -rn "step_counter" mlx_diffusion_kit/cache/fb_cache.py tests/test_fb_cache.py` → empty ✓
+- `grep -n "MotionConfig\|fbcache_reset" mlx_diffusion_kit/orchestrator.py` → empty ✓
+- `grep -n "TODO(future)" mlx_diffusion_kit/tokens/learned_sparsity.py` → 1 match at L59 ✓
+- Import smoke (`import mlx_diffusion_kit`, all submodules) → OK, 89 top-level exports ✓
+- Full test suite: **284 pass** (previously 282 on v0.2.0 — net +2: P9.0 regression + P9.1 integration)
+- No existing tests modified other than the test_fb_cache.py reset test (which had to drop the `step_counter` assertion)
+
+### Tech cost assessment
+- P9.0: `dataclasses.replace` on a scalar dataclass is a single `__init__` call.
+  Zero MLX array allocation. Negligible runtime cost vs the previous save-mutate-restore.
+- P9.1: one integration test, 10 iterations of small mx.arrays. Runs in ~60 ms.
+- P9.2: pure deletion — net reduction of ~15 lines of source, one int field per
+  FBCacheState instance (~8 bytes saved per cache).
+
+### Commit sequence on this branch
+```
+1beb966 chore: P9.2 minor cleanup (unused imports, dead telemetry, future-TODO)
+2f5461a test(integration): end-to-end scenario with 4 rebuilt components active
+29c5d8a fix(orchestrator): make motion-adjusted threshold exception-safe
+```
+
+### Status
+Ready for merge review on `chore/p9-cleanup`. No push per prompt directive.
+After merge to main, suggested tag `v0.2.1` (patch bump — bug fix +
+integration tests + cleanup, no new features, no breaking API changes).
+
+### Confidence
+- Overall: [HIGH]
+- Risks: The P9.0.2 sweep used 6 grep patterns to look for variants of
+  save-mutate-restore. All returned empty. If there's a variant the patterns
+  didn't anticipate (e.g., mutation via a wrapper function that itself
+  writes-through to a config, or mutation via a method that takes cfg by
+  reference and mutates it), it wouldn't show. Given the small codebase size
+  (~5600 LOC) and the narrow set of dataclass configs, this is very unlikely —
+  but noted here for completeness.

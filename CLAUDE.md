@@ -176,6 +176,51 @@ mlx_diffusion_kit/
 - **276+ tests** across 27 test files
 - **2 functional scripts** (calibrate_teacache.py, analyze_layer_redundancy.py)
 
+## Test methodology (validated in P7/P8/P9 cycles)
+
+Three principles for implementing new components and fixing bugs in this repo:
+
+1. **Tests from contract, not from code.** When implementing a component from a
+   paper or specification, write tests that encode the algorithm's invariants
+   BEFORE writing the implementation. Tests derived from whatever the first
+   implementation happens to produce will validate bugs just as happily as
+   they validate correctness. A test that says "full-rank SVD must reconstruct
+   the original kernel to float32 precision" is a contract; a test that says
+   "the output of decompose(W) then compose() matches what my current code
+   produces" is a tautology. This is the discipline that let P7 B18 catch
+   its own transpose-ordering risk on the first implementation.
+
+2. **Regression tests must be stash-pop validated.** When fixing a bug, the
+   standard of proof for the regression test is: "would this test have failed
+   BEFORE the fix was applied?". The only way to answer that is to actually
+   run the new test against the pre-fix code. Workflow:
+
+   ```bash
+   # After committing the fix + test together, OR before staging them:
+   git stash push -- path/to/fix_file.py        # temporarily un-apply the fix
+   $VENV/bin/python -m pytest tests/new_test.py # test MUST fail
+   git stash pop                                # restore the fix
+   $VENV/bin/python -m pytest tests/new_test.py # test must now pass
+   ```
+
+   A regression test that passes in the pre-fix world is not a regression
+   test — it's a tautology that agrees with the post-fix implementation.
+   This principle was applied in P9.0 and caught a class of failures that
+   pure code review would have missed.
+
+3. **Anti-pattern sweeps use multiple greps, not one.** When review identifies
+   a bug pattern (e.g., save-mutate-restore around a call that could raise),
+   do not assume the reviewer found all instances. Run at least 3 distinct
+   grep patterns targeting the anti-pattern from different angles, then
+   audit every match manually. Document the patterns used and the match
+   count in the SESSION_LOG. P9.0.2 used 6 grep patterns to confirm the
+   anti-pattern had exactly one instance; single-pattern sweeps would have
+   been insufficient.
+
+These principles are non-negotiable for bug fixes in this repo. For new
+features, principles 1 and 3 apply; principle 2 applies when the feature
+fixes a latent bug or closes an invariant gap.
+
 ## Output constraint — MANDATORY
 NEVER produce a monolithic response exceeding 20000 tokens.
 ### Reading large files
