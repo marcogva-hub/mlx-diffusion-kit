@@ -2,7 +2,48 @@
 
 All notable changes to mlx-diffusion-kit are documented here.
 
-## [Unreleased] — P7 rebuild branch
+## [0.2.1] — 2026-04-18
+
+P9 review cleanup on top of the P7 rebuild + P8 fixes merged in v0.2.0.
+
+### Fixed
+- **Orchestrator exception-safety** — the motion-adjusted TeaCache
+  threshold path no longer mutates the user-supplied `TeaCacheConfig`
+  in place. Uses `dataclasses.replace` so the original config is
+  untouched even if `teacache_should_compute` raises mid-call. Bug
+  introduced in P5.5 (WorldCache motion), surfaced by P9 review.
+- **FBCache** — `fbcache_reconstruct` now validates shape against the
+  cached residual and raises a clear `ValueError` on mismatch (vs
+  cryptic MLX broadcast error).
+
+### Added (tests)
+- Regression test for the exception-safety fix — stash-pop validated.
+- Four-component integration test exercising TeaCache + FBCache +
+  SpectralCache + DeepCache together through `DiffusionOptimizer`.
+- B18 forward-equivalence test: composed `SeparableConv3D` matches
+  dense `nn.Conv3d(W)(x)` at full rank (atol 1e-3).
+- B18 `build_separable_from_decomposition(bias=...)` gains + test.
+
+### Removed
+- Dead `step_counter` field on `FBCacheState` (was write-only).
+- Unused imports cleaned across 6 files (`field`, `MotionConfig`,
+  `fbcache_reset`).
+
+### Docs
+- CLAUDE.md: codified three test-methodology principles validated
+  across the P7/P8/P9 cycles (contract-derived tests, stash-pop
+  regression validation, multi-grep anti-pattern sweeps).
+- `TODO(future)` on DiffSparseRouter's `_pretrained` flag explaining
+  the intentionally-unreachable learned branch.
+
+### [abandoned] P10 SkipSR
+After implementation, the `feat/skipsr` branch was abandoned without
+merge. SkipSR (arXiv 2510.08799) requires a trainable mask predictor,
+image-space scoring, and mask-aware rotary positional encodings — none
+of which can be faithfully reproduced as a training-free orchestration
+layer. Aligns with the prior exclusion of SLA/LLSA/SALAD.
+
+## [0.2.0] — 2026-04-07
 
 Post-release audit of the initial v0.1.0 caught that five components
 (B2, B3, B5, B7, B12) had been merged with shallow or semantically

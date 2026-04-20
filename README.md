@@ -4,7 +4,7 @@ Inference optimizations for diffusion and video super-resolution models on
 MLX / Apple Silicon. Training-free techniques that reduce compute by 2-5x
 without quality loss.
 
-Current version: **0.1.0** — 22 optimization components, 276+ tests.
+Current version: **0.2.1** — 23 optimization components, 284+ tests.
 
 ## Foreword
 
@@ -140,7 +140,7 @@ python scripts/analyze_layer_redundancy.py --weights model.npz --output scores.j
 
 ## Documentation
 
-- `docs/API_MANUAL.md` — Complete API reference for all 46 exports
+- `docs/API_MANUAL.md` — Complete API reference for all 89 exports
 - `docs/ARCHITECTURE.md` — Module structure and design principles
 - `CHANGELOG.md` — Version history
 

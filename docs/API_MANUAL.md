@@ -1,11 +1,11 @@
 # mlx-diffusion-kit API Manual
 
-Version: **0.1.0** — 89 public exports.
+Version: **0.2.1** — 89 public exports.
 
 All exports are available from the top-level package:
 ```python
 import mlx_diffusion_kit as mdk
-mdk.__version__  # "0.1.0"
+mdk.__version__  # "0.2.1"
 ```
 
 **`__version__`** — Package version string.
@@ -270,6 +270,13 @@ Return `fb_output + cached_residual`. Raises if no cache populated.
 
 **`fbcache_reset(state) -> None`** — Clear state.
 
+**`FBCacheState`** — Mutable per-inference state. Attributes:
+- `prev_fb_output: mx.array | None`
+- `cached_residual: mx.array | None`
+- `consecutive_cached: int`
+
+**`create_fbcache_state() -> FBCacheState`** — Fresh state factory.
+
 ### SpectralCache (B3)
 
 **`SpectralCacheConfig`** — Frequency-domain feature caching.
@@ -289,6 +296,14 @@ Force-refresh both bands from features.
 
 **`spectral_cache_reset(state) -> None`**
 
+**`SpectralCacheState`** — Attributes:
+- `cached_low_freq: mx.array | None`
+- `cached_high_freq: mx.array | None`
+- `last_low_recompute_step: int` / `last_high_recompute_step: int`
+- `prev_full_spectra: list[tuple[mx.array, mx.array]]` — SeaCache history.
+
+**`create_spectral_cache_state() -> SpectralCacheState`** — Fresh state factory.
+
 ### DeepCache (B5)
 
 **`DeepCacheConfig`** — UNet deep-branch caching.
@@ -298,6 +313,13 @@ Force-refresh both bands from features.
 Delta-based (not modulo), so TeaCache-skipped step sequences stay correct.
 
 **`deepcache_store(features, step_idx, state)`** / **`deepcache_get(state)`** / **`deepcache_reset(state)`**.
+
+**`DeepCacheState`** — Attributes:
+- `cached_deep_features: mx.array | None`
+- `last_recompute_step: int` (−1 before first store)
+- `recompute_count: int` — total recomputes across the run.
+
+**`create_deepcache_state() -> DeepCacheState`** — Fresh state factory.
 
 ### MosaicDiff layer redundancy (moved out of DeepCache)
 
@@ -322,6 +344,16 @@ Reassemble full `[B, N, D]` tensor from disjoint pieces.
 
 **`toca_get_cached(layer_idx, state)`** / **`toca_reset(state)`**.
 
+**`ToCaLayerState`** — Per-layer history slot. Attributes:
+- `cached_tokens: mx.array | None` — most recent tokens.
+- `prev_tokens: mx.array | None` — one step older; enables velocity scoring.
+- `step_count: int`
+
+**`ToCaState`** — Container over all layers. Use `state.layer(idx)` to
+get-or-create the `ToCaLayerState` for a given layer.
+
+**`create_toca_state() -> ToCaState`** — Fresh state factory.
+
 ### DiTFastAttn (B12)
 
 **`AttnStrategy`** — Enum: `FULL`, `WINDOW`, `SHARE`, `RESIDUAL`.
@@ -339,6 +371,12 @@ safety fallback when a required cache is missing.
 **`ditfastattn_record_attn_map`** / **`ditfastattn_get_cached_attn`**
 **`ditfastattn_record_residual`** / **`ditfastattn_get_cached_residual`**
 **`ditfastattn_reset`**
+
+**`DiTFastAttnState`** — Attributes:
+- `cached_attn_maps: dict[int, mx.array]` — for SHARE strategy.
+- `cached_residuals: dict[int, mx.array]` — for RESIDUAL strategy.
+
+**`create_ditfastattn_state() -> DiTFastAttnState`** — Fresh state factory.
 
 ### Separable Conv3D (B18)
 

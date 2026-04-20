@@ -1,6 +1,6 @@
 # mlx-diffusion-kit Architecture
 
-Version: **0.1.0**
+Version: **0.2.1**
 
 ## 1) System Overview
 
@@ -26,7 +26,7 @@ User Pipeline (inference script)
 ```
 mlx_diffusion_kit/
 ├── __init__.py              # 46 public exports
-├── __version__.py           # "0.1.0"
+├── __version__.py           # "0.2.1"
 ├── maturity.py              # Component maturity registry
 ├── orchestrator.py          # B23 — DiffusionOptimizer + PISA
 │
